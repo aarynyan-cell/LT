@@ -396,13 +396,14 @@ Manifest V3 (WXT)
 
 ---
 
-## 14. 在线静态版（GitHub Pages）与"自带密钥"
+## 14. 在线静态版（Cloudflare Pages）与"自带密钥"
 
 | 关注点 | 做法 |
 |---|---|
-| 部署 | `.github/workflows/deploy-pages.yml`：推送到 `main` → 跑 `node:test` → 把 `lectureloop/app/public` 作为 Pages 产物发布（零构建） |
-| 子路径 | 所有静态资源与 API 均用**相对路径**（`css/app.css`、`js/main.js`、`api/config`），可部署在 `/LT/` 这类子路径下 |
-| 模式判断 | 启动时请求 `api/config`：成功 = 本地版（有后端），失败 = 在线静态版（`config.server=false`） |
+| 部署 | Cloudflare Pages Git 集成（支持私有仓库、免费）：输出目录 `lectureloop/app/public`，无构建命令；`.github/workflows/test.yml` 只负责推送时跑单元测试 |
+| 安全头 | `public/_headers`：CSP（`connect-src 'self' https://api.anthropic.com`）、`Permissions-Policy: microphone=(self)` 等，与本地服务一致 |
+| 子路径 | 所有静态资源与 API 均用**相对路径**（`css/app.css`、`js/main.js`、`api/config`），根路径或 `/LT/` 这类子路径都能部署 |
+| 模式判断 | 启动时请求 `api/config`：返回带 `version` 的配置 = 本地版；404 或被托管平台回退成 `index.html`（Cloudflare 的 SPA 行为，状态 200）= 在线静态版（`config.server=false`） |
 | AI 路由 | `lib/api.js`：本地服务端密钥 → 浏览器自带密钥（`lib/claude-browser.js`）→ 离线启发式 |
 | 共享逻辑 | `lib/ai-tasks.js` 同时被 `server/ai.js` 与浏览器端引用：提示词、JSON Schema、结果校验（防幻觉、索引裁剪）两端完全一致 |
 | SDK | 官方 `@anthropic-ai/sdk` 经 esbuild 打包为 `vendor/anthropic-sdk.mjs`（约 360KB），仅在使用浏览器密钥时动态加载；`dangerouslyAllowBrowser: true` 仅用于用户本人的密钥 |

@@ -19,21 +19,24 @@
 
 | 用法 | 适合 | 怎么开始 |
 |---|---|---|
-| **在线版** | 直接打开、手机也能用 | 打开 <https://aarynyan-cell.github.io/LT/>（需先在仓库启用 GitHub Pages，见下文） |
+| **在线版** | 直接打开、手机也能用 | 部署到 Cloudflare Pages（免费，源码仓库可保持私有，见下文）后打开 `https://<项目名>.pages.dev` |
 | **本地一键运行** | 日常使用，可在服务端配置密钥 | 双击 `start-mac.command`（Windows：`start-windows.bat`） |
 | **开发** | 改代码、调试 | `npm install && npm start` |
 
 两种版本功能相同。**数据都只保存在你自己的浏览器里**（按网址区分：在线版和本地版的课程互不相通，可用“设置 → 导出/导入备份”搬运）。
 
-### 在线版（GitHub Pages）
+### 在线版（Cloudflare Pages，免费，仓库可保持私有）
 
 在线版是纯静态网页，没有后端：实时字幕、导入、精听、卡点训练、离线笔记都能直接用；要用 Claude 生成笔记、词汇和实时翻译，在 **设置 → 在浏览器中使用 Claude** 里填入你**自己的** Claude API 密钥即可（只保存在当前浏览器，由浏览器直接发送到 api.anthropic.com，不进备份文件）。
 
-首次启用（只需一次）：
+首次部署（只需一次，约 5 分钟）：
 
-1. 仓库需为 **Public**（私有仓库使用 Pages 需要 GitHub Pro 等付费方案）。
-2. 仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。
-3. 到 **Actions → Deploy LectureLoop to GitHub Pages → Run workflow** 运行一次（之后每次推送到 `main` 会自动部署，部署前会先跑单元测试）。
+1. 注册 / 登录 [Cloudflare](https://dash.cloudflare.com/)，进入 **Workers & Pages → Create → Pages → Connect to Git**。
+2. 授权 GitHub 时选择 **Only select repositories**，只勾选这个仓库（私有仓库也可以）。
+3. 构建设置：**Framework preset** 选 `None`，**Build command** 留空，**Build output directory** 填 `lectureloop/app/public`，生产分支为 `main`。
+4. 点 **Save and Deploy**，完成后得到 `https://<项目名>.pages.dev`。之后每次推送到 `main` 都会自动更新。
+
+说明：网页的前端代码（`public/` 里的 JS/CSS）任何访问者都能在浏览器里看到，这是所有网站的共性；私有仓库保护的是文档、服务端代码、测试和提交历史。安全响应头（CSP、只允许本站使用麦克风）由 `public/_headers` 提供。仓库推送时 GitHub Actions 只跑单元测试，不负责部署。
 
 ### 本地一键运行
 
@@ -113,7 +116,7 @@ npm run dev:mock
 ## 目录结构
 
 ```
-.github/workflows/deploy-pages.yml   推送到 main → 跑测试 → 部署 GitHub Pages（在线版）
+.github/workflows/test.yml           推送 / PR 时跑单元测试（在线版由 Cloudflare Pages 直接从仓库部署）
 lectureloop/
 ├─ start-mac.command / start-windows.bat / start.sh   一键启动
 ├─ docs/                 PRD / 产品设计 / 前端方案 / 截图
@@ -122,7 +125,7 @@ lectureloop/
    ├─ server/            claude.js（官方 SDK：结构化输出 + 流式 + 拒答处理）· ai.js · translate.js · env.js
    ├─ tools/             mock-api.mjs、dev-mock.mjs（无密钥联调）· build-sdk.mjs（打包浏览器版 SDK）
    ├─ tests/             domain.test.mjs（node:test）
-   └─ public/            无构建前端：Preact + htm（vendored，离线可用）
+   └─ public/            无构建前端：Preact + htm（vendored，离线可用）；_headers 为在线版安全响应头
       ├─ vendor/         htm-preact.js · anthropic-sdk.mjs（官方 SDK 浏览器打包，按需加载）
       └─ js/  lib/（领域逻辑，可在 Node 测试；ai-tasks.js 为服务端与浏览器共用的提示词/Schema/校验）· components/ · views/ · store.js · db.js
 ```

@@ -1,0 +1,23 @@
+# 推送 / PR 时运行 LectureLoop 单元测试（在线版由 Cloudflare Pages 直接从仓库部署，这里不负责部署）。
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        working-directory: lectureloop/app
+        run: node --test "tests/*.test.mjs"

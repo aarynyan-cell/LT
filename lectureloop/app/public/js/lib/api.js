@@ -31,10 +31,12 @@ async function call(url, body, { timeout = 120_000 } = {}) {
   }
 }
 
-// 相对路径：本地版服务在根路径，在线版（GitHub Pages 子路径）请求会失败并进入静态模式
+// 相对路径：本地版服务在根路径；在线静态版没有后端，请求会 404，或被托管平台（如 Cloudflare Pages）
+// 回退成 index.html（状态 200）——所以必须校验返回的是不是 LectureLoop 的配置，而不是只看状态码。
+const STATIC_CONFIG = { server: false, claude: false, translate: { google: false, claude: false }, translateAny: false };
 export const getConfig = () => call('api/config')
-  .then((j) => ({ ...j, server: true }))
-  .catch(() => ({ server: false, claude: false, translate: { google: false, claude: false }, translateAny: false }));
+  .then((j) => (j && typeof j.version === 'string' ? { ...j, server: true } : STATIC_CONFIG))
+  .catch(() => STATIC_CONFIG);
 
 export async function aiNotes(p) {
   if (cfg?.claude) return call('api/ai/notes', p, { timeout: 300_000 });
