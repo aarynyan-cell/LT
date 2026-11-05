@@ -1,6 +1,6 @@
 // 卡点训练：① 盲听（循环 + 降速）→ ② 听写（可选，词级对比）→ ③ 揭示（原文/译文/陷阱/前后文）→ ④ 自评（间隔重复）
 import { html, useState, useEffect, useMemo, useRef } from '../h.js';
-import { useStore, actions, getCues, clipTimes, dueClips, lessonUrl, getLesson, getCourse, toast } from '../store.js';
+import { useStore, actions, getCues, clipTimes, dueClips, lessonUrl, getLesson, getCourse, toast, ttsPrefsFor } from '../store.js';
 import { Player } from '../lib/player.js';
 import { wordDiff } from '../lib/diff.js';
 import { INTERVALS, MAX_BOX, nextBox } from '../lib/srs.js';
@@ -78,7 +78,7 @@ function Card({ clip, player, onDone }) {
       const cs = await getCues(lesson.id);
       if (player.__lessonId !== lesson.id) {
         const audio = lesson.hasAudio ? await actions.getAudio(lesson.id) : null;
-        await player.load({ cues: cs, duration: lesson.duration, blob: audio?.blob || null, lang: lesson.srcLang });
+        await player.load({ cues: cs, duration: lesson.duration, blob: audio?.blob || null, lang: lesson.srcLang, tts: ttsPrefsFor(lesson.srcLang) });
         player.__lessonId = lesson.id;
       } else player.updateCues(cs, lesson.duration);
       if (dead) return;

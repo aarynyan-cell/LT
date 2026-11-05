@@ -16,6 +16,7 @@ const H = await import(L + 'heuristics.js');
 const S = await import(L + 'srs.js');
 const D = await import(L + 'diff.js');
 const A = await import(L + 'ai-tasks.js');
+const V = await import(L + 'voices.js');
 
 // ---------- text ----------
 test('splitSentences: 句末标点、缩写、小数', () => {
@@ -261,6 +262,54 @@ test('translateTask / alignTranslation：按输入对齐，缺行留空，全空
   assert.equal(A.alignTranslation(items, { items: [] }), null);
   assert.equal(A.supportsServerFallback('claude-opus-5-5'), true);
   assert.equal(A.supportsServerFallback('claude-haiku-5-5'), false);
+});
+
+// ---------- 朗读语音 ----------
+const mk = (name, lang, local = true) => ({ name, lang, voiceURI: name, localService: local });
+// macOS 上 getVoices() 的真实形态：搞怪语音混在英语语音里，且排在前面
+const MAC = [mk('Albert', 'en-US'), mk('Bad News', 'en-US'), mk('Bahh', 'en-US'), mk('Whisper', 'en-US'), mk('Zarvox', 'en-US'), mk('Trinoids', 'en-US'),
+  mk('Fred', 'en-US'), mk('Alex', 'en-US'), mk('Samantha', 'en-US'), mk('Daniel', 'en-GB'), mk('Amélie', 'fr-CA'), mk('Thomas', 'fr-FR'), mk('Tingting', 'zh-CN')];
+
+test('语音：搞怪语音永远不会被自动选中；只有标准语音时 auto 不朗读', () => {
+  assert.equal(V.tierOf(mk('Whisper', 'en-US')), 'bad');
+  assert.equal(V.tierOf(mk('Zarvox', 'en-US')), 'bad');
+  assert.equal(V.tierOf(mk('Fred', 'en-US')), 'poor');
+  assert.equal(V.tierOf(mk('Samantha', 'en-US')), 'ok');
+  const auto = V.pickVoice(MAC, 'en', { mode: 'auto' });
+  assert.equal(auto.voice, null);                    // 没有自然语音：不朗读，改用静音计时
+  assert.equal(auto.reason, 'not-natural');
+  const on = V.pickVoice(MAC, 'en', { mode: 'on' }); // 强制朗读：选标准档里最好的，且不是搞怪语音
+  assert.ok(['Samantha', 'Alex', 'Daniel'].includes(on.voice.name), on.voice.name);
+  assert.equal(V.pickVoice(MAC, 'en', { mode: 'off' }).voice, null);
+});
+
+test('语音：Premium / Enhanced / Google 语音被自动优先选中', () => {
+  const withPremium = [...MAC, mk('Ava (Premium)', 'en-US'), mk('Daniel (Enhanced)', 'en-GB'), mk('Google US English', 'en-US', false), mk('Google français', 'fr-FR', false), mk('Google 普通话（中国大陆）', 'zh-CN', false)];
+  assert.equal(V.pickVoice(withPremium, 'en').voice.name, 'Ava (Premium)');   // 最佳 > Google
+  assert.equal(V.pickVoice(withPremium, 'fr').voice.name, 'Google français');
+  assert.equal(V.pickVoice(withPremium, 'zh').voice.name, 'Google 普通话（中国大陆）');
+  const chromeOnly = [mk('Whisper', 'en-US'), mk('Google UK English Female', 'en-GB', false), mk('Google US English', 'en-US', false)];
+  assert.equal(V.pickVoice(chromeOnly, 'en').voice.name, 'Google US English'); // 同档偏好 en-US
+  assert.equal(V.tierOf(mk('Microsoft Aria Online (Natural) - English (United States)', 'en-US', false)), 'great');
+});
+
+test('语音：用户明确选择优先；espeak / 只有搞怪语音时不朗读', () => {
+  const r = V.pickVoice(MAC, 'en', { mode: 'auto', voice: 'Daniel' });
+  assert.equal(r.voice.name, 'Daniel'); assert.equal(r.reason, 'chosen');
+  const linux = [mk('English (America)+espeak', 'en-US'), mk('espeak-ng', 'en')];
+  assert.equal(V.pickVoice(linux, 'en', { mode: 'on' }).voice, null);
+  assert.equal(V.pickVoice([mk('Whisper', 'en-US'), mk('Zarvox', 'en-US')], 'en', { mode: 'on' }).reason, 'only-bad');
+  assert.equal(V.pickVoice([], 'en').reason, 'none');
+  assert.equal(V.listForLang(MAC, 'fr').length, 2);          // fr-CA 与 fr-FR 都算法语
+  assert.equal(V.listForLang(MAC, 'zh')[0].name, 'Tingting');
+});
+
+test('语音：长句为在线语音分段（≤140 字符、不丢字）', () => {
+  const long = 'First clause here, second clause follows; third clause is also long: ' + 'word '.repeat(40) + 'and the end.';
+  const parts = V.chunkForTts(long, 140);
+  assert.ok(parts.length >= 2 && parts.every((p) => p.length <= 140), parts.map((p) => p.length).join());
+  assert.equal(parts.join(' ').replace(/\s+/g, ' '), long.replace(/\s+/g, ' ').trim());
+  assert.deepEqual(V.chunkForTts('Short one.'), ['Short one.']);
 });
 
 // ---------- 真实样本（可选）----------

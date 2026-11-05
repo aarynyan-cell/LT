@@ -12,6 +12,7 @@ import { getConfig, aiNotes, aiLanguage, setApiConfig, aiAvailable } from './lib
 export const DEFAULTS = {
   srcLang: 'en', targets: ['zh'], fontSize: 30, fadeOriginal: false, hideFillers: false, showTr: true,
   noteLang: 'zh', recordingAck: false, seeded: false, trLang: 'zh', blind: false,
+  ttsMode: 'auto', ttsVoices: {},
 };
 
 // ---------- 状态 ----------
@@ -52,6 +53,8 @@ export const lessonUrl = (id, q = {}) => `/lesson/${id}${Object.keys(q).length ?
 const replaceBy = (arr, item) => (arr.some((x) => x.id === item.id) ? arr.map((x) => (x.id === item.id ? item : x)) : [...arr, item]);
 export const getLesson = (id) => state.lessons.find((l) => l.id === id);
 export const getCourse = (id) => state.courses.find((c) => c.id === id);
+/** 朗读偏好（传给 player.load） */
+export const ttsPrefsFor = (lang, s = state.settings) => ({ mode: s.ttsMode || 'auto', voice: s.ttsVoices?.[lang] || '' });
 export const dueClips = (clips = state.clips, now = Date.now()) => queue(clips, now);
 
 export function toast(msg, { undo, kind = 'info', ms = 4500 } = {}) {

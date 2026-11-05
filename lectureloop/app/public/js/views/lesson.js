@@ -1,6 +1,6 @@
 // Studio：转录 + 笔记/语言/片段 + 播放器 + 时间轴。一节课的"精听工作台"。
 import { html, useState, useEffect, useMemo, useRef } from '../h.js';
-import { useStore, actions, getCues, toast, navigate } from '../store.js';
+import { useStore, actions, getCues, toast, navigate, ttsPrefsFor } from '../store.js';
 import { Player } from '../lib/player.js';
 import { readAudioDuration } from '../lib/importers.js';
 import { fmtDuration, fmtTime } from '../lib/util.js';
@@ -43,7 +43,7 @@ export function Lesson({ route }) {
       const cs = await getCues(id);
       const audio = lesson.hasAudio ? await actions.getAudio(id) : null;
       if (dead) return;
-      await player.load({ cues: cs, duration: lesson.duration, blob: audio?.blob || null, lang: lesson.srcLang });
+      await player.load({ cues: cs, duration: lesson.duration, blob: audio?.blob || null, lang: lesson.srcLang, tts: ttsPrefsFor(lesson.srcLang) });
       if (dead) { player.dispose(); return; }
       setCues(cs);
       if (focusCue != null) player.seekCue(focusCue);

@@ -2,6 +2,7 @@
 // 控制器用 requestAnimationFrame 轮询时间（比 timeupdate 精确得多，循环边界误差 < 50ms）。
 import { cueAt } from './text.js';
 import { clamp } from './util.js';
+import { pickVoice, chunkForTts } from './voices.js';
 
 export const SPEEDS = [0.5, 0.6, 0.75, 0.9, 1, 1.25, 1.5, 2];
 const TTS_LANG = { en: 'en-US', fr: 'fr-FR', zh: 'zh-CN' };
@@ -46,8 +47,8 @@ class AudioEngine {
 
 class TtsEngine {
   kind = 'tts';
-  constructor(cues, lang, duration) {
-    this.cues = cues; this.lang = TTS_LANG[lang] || 'en-US'; this.duration = duration;
+  constructor(cues, lang, duration, voice) {
+    this.cues = cues; this.lang = TTS_LANG[lang] || 'en-US'; this.duration = duration; this.voice = voice;
     this.rate = 1; this._playing = false; this._t = 0; this.idx = 0; this.token = 0; this.t0 = 0;
   }
   async ready() {}
@@ -63,13 +64,19 @@ class TtsEngine {
     speechSynthesis.cancel();
     if (i >= this.cues.length) { this._playing = false; this._t = this.duration; return; }
     this.idx = i; this.t0 = performance.now();
-    const u = new SpeechSynthesisUtterance(this.cues[i].text);
-    u.lang = this.lang; u.rate = clamp(this.rate, 0.5, 2);
-    const v = speechSynthesis.getVoices().find((x) => x.lang?.replace('_', '-').startsWith(this.lang.slice(0, 2)));
-    if (v) u.voice = v;
-    const next = () => { if (my === this.token && this._playing) this._speak(i + 1); };
-    u.onend = next; u.onerror = next;
-    speechSynthesis.speak(u);
+    // 远程（在线）语音在约 15 秒后会截断过长的句子：分成小段依次朗读
+    const chunks = this.voice && this.voice.localService === false ? chunkForTts(this.cues[i].text) : [this.cues[i].text];
+    const speakChunk = (k) => {
+      if (my !== this.token || !this._playing) return;
+      if (k >= chunks.length) return this._speak(i + 1);
+      const u = new SpeechSynthesisUtterance(chunks[k]);
+      u.lang = this.voice?.lang || this.lang; u.rate = clamp(this.rate, 0.5, 2);
+      if (this.voice) u.voice = this.voice;
+      const next = () => speakChunk(k + 1);
+      u.onend = next; u.onerror = next;
+      speechSynthesis.speak(u);
+    };
+    speakChunk(0);
   }
   play() { this._playing = true; this._speak(cueAt(this.cues, this._t)); }
   pause() { this._t = this.time; this._playing = false; this.token++; speechSynthesis.cancel(); }
@@ -121,10 +128,14 @@ export class Player {
   }
   get time() { return this.engine?.time ?? 0; }
 
-  async load({ cues, duration, blob = null, lang = 'en', engine = null }) {
+  /** tts: { mode:'auto'|'on'|'off', voice?:string }——见 voices.js；没有合适的语音时 ttsOk=false，改用静音计时 */
+  async load({ cues, duration, blob = null, lang = 'en', engine = null, tts = {} }) {
     this.dispose();
     this.cues = cues; this.duration = duration; this.blob = blob; this.lang = lang;
-    this.ttsOk = await voicesReady();
+    this.ttsPrefs = tts;
+    this.ttsVoice = null;
+    if (await voicesReady()) this.ttsVoice = pickVoice(speechSynthesis.getVoices(), lang, tts).voice;
+    this.ttsOk = !!this.ttsVoice;
     await this._makeEngine(engine);
     this.curCue = -1;
     this.emit('state', this.state);
@@ -136,7 +147,7 @@ export class Player {
     this.engine?.dispose();
     let e;
     if (want === 'audio' && this.blob) { e = new AudioEngine(this.blob, this.duration); await e.ready(); this.duration = e.duration || this.duration; }
-    else if (want === 'tts' && this.ttsOk) e = new TtsEngine(this.cues, this.lang, this.duration);
+    else if (want === 'tts' && this.ttsOk) e = new TtsEngine(this.cues, this.lang, this.duration, this.ttsVoice);
     else e = new ClockEngine(this.duration);
     e.setRate(this.rate);
     this.engine = e;
