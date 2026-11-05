@@ -1,5 +1,22 @@
 # 交接说明（云端 → 本地继续）
 
+> ## 状态更新：已上线（未做完整测试）
+> 应用户要求，本分支已**在没有完成全部测试的情况下**合并到 `main` 并自动部署到 <https://lt.multape.workers.dev/>。
+> 上线前只做了：单元测试（31 个，通过）、`wrangler deploy --dry-run`（通过）、敏感信息扫描（无）。
+>
+> **已上线但没有验证过的部分（出问题时优先怀疑这里）：**
+> 1. **多服务商 API 密钥**（`providers.js` / `llm-openai.js` / `llm-client.js` / 设置页新卡片）：只有语法检查，**没有单元测试，没有浏览器测试**，除 Anthropic 外也**没有任何真实服务商验证**。Claude 路径被重构过（`claude-browser.js` → `llm-client.js`），旧版保存的单个 Claude 密钥靠 `byok.js` 迁移——**这条迁移没测过**；如果更新后设置页看不到已保存的密钥，重新粘贴一次即可。
+> 2. **同源中继 `/relay`**（`worker/relay.js`，Cloudflare Worker + 本地服务）：构建校验通过，但**没有真正请求过**；白名单/Origin 校验没有单元测试。
+> 3. **后台标签页被隐藏时的录音**、**真实的“弹出到桌面”（Document PiP）窗口**、**真实麦克风**：只用模拟环境测过。
+> 4. 文档：`docs/01-PRD.md`、`docs/02-product-design.md`、`docs/03-frontend-plan.md` **还没有**写入后台录制、悬浮字幕、朗读语音、多服务商密钥。
+>
+> **回滚**：上一个经过完整测试的版本是 `main` 的 `f99d74d`（只含朗读语音修复）。Cloudflare 控制台 → 项目 `lt` → Deployments → 选更早的版本 → Rollback；或 `git revert`。
+>
+> **仍待办**：给 `providers.js`、`llm-openai.js`（用 `tools/mock-api.mjs` 的 `/p/<mode>/` 模拟接口）、`handleRelay`、`byok.js` 迁移补测试；用真实密钥验证 OpenAI / DeepSeek / Gemini 等；更新文档；真实 Chrome 手测后台标签页与 PiP。
+> 排查字幕丢失：设置 → 数据 → 导出识别日志。
+
+---
+
 > 给接手的 Claude Code（或人）：这是一份自包含的交接文档。云端会话用量耗尽，剩余工作请在本地完成。
 > 先读 `lectureloop/README.md` 了解项目；本文件只写**当前进度、未完成事项和设计决定**。
 
