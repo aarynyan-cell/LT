@@ -167,7 +167,7 @@ stateDiagram-v2
     Blind --> Reveal: 揭示文字
     Dictate --> Reveal: 提交 → 词级对比
     Reveal --> Rate
-    Rate --> Queue: 没懂 → 盒1（明天再来）
+    Rate --> Queue: 没懂 → 盒1（10 分钟后可再练）
     Rate --> Queue: 勉强 → 原盒
     Rate --> Queue: 听懂 → 升一盒
     Queue --> [*]: 今日完成

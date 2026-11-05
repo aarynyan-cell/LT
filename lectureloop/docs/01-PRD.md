@@ -338,7 +338,7 @@ Course 课程 ──< Lesson 课时 ──< Part 片段（3–8 分钟，主题�
 | FR-6.2 | 卡点属性：时间范围、**原因**（语速/口音/术语/公式口述/句式复杂/音质/其他）、备注、标签 | P0 | 原因可事后补填 |
 | FR-6.3 | **卡点训练队列**：到期优先，其次新卡点；首页显示"今日待练"数 | P0 | — |
 | FR-6.4 | 训练四步：**① 盲听**（自动循环、降速阶梯 0.75→0.9→1.0、转录隐藏）→ **② 听写**（可选，逐词对比评分）→ **③ 揭示**（原文、译文、涉及词汇与陷阱、前后文）→ **④ 自评**（没懂 / 勉强 / 听懂） | P0 | 完整一卡 < 2 分钟 |
-| FR-6.5 | 调度：Leitner 盒子 `1d / 3d / 7d / 14d / 30d`；"没懂"回到盒 1；连续 5 级通过标记掌握 | P0 | — |
+| FR-6.5 | 调度：Leitner 盒子 `1d / 3d / 7d / 14d / 30d`；"没懂"回到盒 1 且 10 分钟后可再练；新卡第一次就听懂直接进盒 2（3 天）；在最高盒再次听懂标记掌握 | P0 | — |
 | FR-6.6 | 听写评分：词级 diff（忽略大小写与标点），显示正确率与漏听/听错词；漏听的词可一键加入词汇 | P0 | — |
 | FR-6.7 | 统计：每课卡点密度、原因分布、周练习量（首页迷你图） | P1（首页基础版 P0） | — |
 
@@ -522,7 +522,7 @@ Course 课程 ──< Lesson 课时 ──< Part 片段（3–8 分钟，主题�
 | 2 | `dog product` | dot product | B×7 | 近音 |
 | 3 | `linear reversion` / `logistic reversions` / `logistic progression` | linear/logistic regression | A×1，B×1 | 近音 |
 | 4 | `super vector` | support vector | B×1 | 弱读 |
-| 5 | `Ginny's score` / `the genie entering the school` | Gini score / Gini impurity | A×2 | 外来词读音 |
+| 5 | `Ginny's score` / `genius (purity) score` / `juniscore` / `injury scope` / `charity score` / `insurance score` / `the genie entering the school` | Gini score / Gini impurity | A×≥7 | 外来词读音（**同一个词至少 7 种误听变体**） |
 | 6 | `decision speed, which speaks attribute` | decision split, which tests an attribute | A×1 | 近音 |
 | 7 | `biased variance trade` | bias–variance trade-off | A×1 | 漏读 |
 | 8 | `a kernel fashion` | a kernel function | B×1 | 近音 |
@@ -538,17 +538,19 @@ Course 课程 ──< Lesson 课时 ──< Part 片段（3–8 分钟，主题�
 ```ts
 Course   { id, name, term, color, srcLang, glossary:[{term, heardAs:string[], note}], createdAt }
 Lesson   { id, courseId, title, date, srcLang, duration, timeline:'real'|'estimated'|'calibrated',
-           hasAudio, parts:Part[], notes?:Notes, language?:Language, sourceName, createdAt }
+           hasAudio, parts:Part[], anchors:[{i,t}], corrections:Correction[], notes?:Notes, language?:Language,
+           sourceName, createdAt }
 Part     { id, title, startCue, endCue, summary? }
-Cue      { i, start, end, text, raw?, tr?:{zh?,fr?,en?}, anchor?:boolean }          // 存于 transcripts[lessonId]
-Clip     { id, lessonId, kind:'stuck'|'clip', start, end, reason?, note, tags:string[],
-           srs:{box,due,attempts:[{ts,result,score?}]}, status:'open'|'mastered', createdAt }
+Cue      { i, start, end, text, raw?, fx?:[{wrong,right}], tr?:{zh?,fr?,en?}, anchor?, edited? } // 存于 transcripts[lessonId]
+Clip     { id, lessonId, kind:'stuck'|'clip', startCue, endCue, reason?, note, tags:string[], practice,
+           srs:{box,due,attempts:[{ts,rating,score?,speed?}]}, status:'open'|'mastered', source, createdAt }
+           // 以句索引定位，时间由句子推导：时间轴校准后片段仍指向同一段话
 Tag      { id, name, color }
 Notes    { source:'claude'|'offline', model?, generatedAt, overview, keyPoints[], concepts[],
            formulas[], emphasized[], questions[], partSummaries, userNotes }
-Language { source, generatedAt, vocab:[{term,pos,def:{zh,en,fr},cue,kind,heardAs[],count,status}],
-           patterns:[{fn,template,explain,cue,extensions:[{en,zh}]}],
-           corrections:[{wrong,right,reason,count,state:'pending'|'applied'|'ignored'}] }
+Language { source, model?, generatedAt, vocab:[{term,pos,def:{zh,en,fr},cue,kind,heardAs[],count,status}],
+           patterns:[{fn,template,explain,cue,extensions:[{en,zh}]}] }
+Correction { wrong, right, reason, count, cues:number[], state:'pending'|'applied'|'ignored', src:'starter'|'glossary'|'claude' }
 ```
 
 ## 附录 C · 术语表

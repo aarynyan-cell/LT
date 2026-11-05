@@ -118,7 +118,7 @@ lectureloop/
          │  ├─ asr.js             Web Speech + MediaRecorder + 演示课堂
          │  ├─ api.js             后端客户端（含浏览器内置 Translator 降级）
          │  └─ seed.js            示例课程
-         ├─ components/           ui.js timeline.js transcript.js importer.js
+         ├─ components/           ui.js timeline.js transcript.js playerbar.js importer.js
          └─ views/                home live library course lesson notes language clips drill vocab settings
 ```
 
@@ -236,7 +236,7 @@ interface Engine {
 | 引擎 | 触发条件 | 实现要点 |
 |---|---|---|
 | `AudioEngine` | Lesson 有录音 | `<audio>` + `playbackRate` + `preservesPitch`；`objectURL` 离开页面时 revoke |
-| `TtsEngine` | 无录音但浏览器有语音 | 逐句 `SpeechSynthesisUtterance`，句末推进；时间轴随 cue 起止同步 |
+| `TtsEngine` | 无录音但浏览器有语音 | 逐句 `SpeechSynthesisUtterance`，句末推进；时间轴随 cue 起止同步；片段循环不向前留余量（否则会先念上一句），终点略过句尾等整句念完 |
 | `ClockEngine` | 都不可用 | 静音，按速度推进时间；仍可跟读高亮、循环 |
 
 **循环/重复**：rAF 每帧检查 `time >= loop.b - ε`，到点 `seek(loop.a)`；`repeatCue(n)` 即把当前句的 `[start,end]` 设为循环并计数，计数耗尽后跳到下一句。
@@ -317,7 +317,9 @@ getUserMedia ─┬─▶ MediaRecorder（dataavailable 每 5s 累积 chunks） 
 
 ### 7.7 SRS（`srs.js`）
 
-`box ∈ {0..5}`，间隔 `[0, 1, 3, 7, 14, 30]` 天；自评 `没懂→box=1，due=明天`、`勉强→box 不变，due=按 box`、`听懂→box+1`；`box ≥ 5` 且再次听懂→`status='mastered'`。队列排序：`due` 升序，新卡优先于同日到期。
+`box ∈ {0..5}`，间隔 `[0, 1, 3, 7, 14, 30]` 天；自评 `没懂→box=1，10 分钟后可再练`、`勉强→box 不变（至少 1），due=按 box`、`听懂→box+1（新卡直接进盒 2）`；在盒 5 再次听懂→`status='mastered'`。队列排序：`due` 升序，新卡优先于同日到期。
+
+**片段定位**：Clip 存 `startCue/endCue`（句索引），播放时由句子时间推导区间（`clipTimes`）。这样锚点校准、绑定录音重标定之后，卡点仍然指向同一段话，而不是一个已经失效的时间。
 
 ---
 
