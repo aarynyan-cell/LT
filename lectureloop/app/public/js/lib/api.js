@@ -7,7 +7,7 @@ let cfg = null;
 /** 启动时由 store 写入 /api/config 的结果；在线静态版没有后端时为 { server:false, ... } */
 export const setApiConfig = (c) => { cfg = c; };
 /** 当前 AI 来源：'server' | 'browser' | null */
-export const aiSource = () => (cfg?.claude ? 'server' : byok.key ? 'browser' : null);
+export const aiSource = () => (cfg?.claude ? 'server' : byok.has ? 'browser' : null);
 export const aiAvailable = () => aiSource() !== null;
 
 async function call(url, body, { timeout = 120_000 } = {}) {
@@ -40,13 +40,13 @@ export const getConfig = () => call('api/config')
 
 export async function aiNotes(p) {
   if (cfg?.claude) return call('api/ai/notes', p, { timeout: 300_000 });
-  if (byok.key) return (await import('./claude-browser.js')).notesInBrowser(p);
-  throw new ApiError('no_key', '未配置 Claude 密钥');
+  if (byok.has) return (await import('./llm-client.js')).notesInBrowser(p);
+  throw new ApiError('no_key', '未配置 API 密钥');
 }
 export async function aiLanguage(p) {
   if (cfg?.claude) return call('api/ai/language', p, { timeout: 300_000 });
-  if (byok.key) return (await import('./claude-browser.js')).languageInBrowser(p);
-  throw new ApiError('no_key', '未配置 Claude 密钥');
+  if (byok.has) return (await import('./llm-client.js')).languageInBrowser(p);
+  throw new ApiError('no_key', '未配置 API 密钥');
 }
 
 /** items: [{i,t}] → { provider, results: { zh: [{i,t}], fr: [...] } } */
@@ -74,7 +74,7 @@ export async function translateLocal(source, target, items) {
   return out;
 }
 
-export const translateAvailable = () => !!(cfg?.translateAny || byok.key || 'Translator' in self);
+export const translateAvailable = () => !!(cfg?.translateAny || byok.has || 'Translator' in self);
 
 /**
  * 统一翻译入口：本地服务(Google/Claude) → 浏览器自带 Claude 密钥 → 浏览器内置翻译 → 抛错（调用方静默降级为仅原文）
@@ -83,7 +83,7 @@ export async function translate({ source, targets, items, context = [], glossary
   targets = targets.filter((t) => t !== source);
   if (!targets.length || !items.length) return { provider: 'none', results: {} };
   if (cfg?.translateAny) return translateRemote({ source, targets, items, context, glossary });
-  if (byok.key) return (await import('./claude-browser.js')).translateInBrowser({ source, targets, items, context, glossary });
+  if (byok.has) return (await import('./llm-client.js')).translateInBrowser({ source, targets, items, context, glossary });
   const results = {};
   for (const t of targets) {
     if (!(await localTranslatorAvailable(source, t))) throw new ApiError('no_provider', '未配置翻译服务');

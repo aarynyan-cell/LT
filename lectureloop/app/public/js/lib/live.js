@@ -69,8 +69,18 @@ async function flush() {
 }
 
 function onFinal(c) {
-  set({ lines: [...state.lines, { ...c, id: uid('ln_') }] });
-  const idx = state.lines.length - 1;
+  let idx;
+  if (c.replace && state.lines.length) {
+    // 引擎迟到的定稿与刚保存的"临时句"高度相似：用定稿替换它（清掉旧译文，重新翻译），而不是重复一句
+    idx = state.lines.length - 1;
+    const next = [...state.lines];
+    next[idx] = { ...c, id: next[idx].id };
+    delete next[idx].replace;
+    set({ lines: next });
+  } else {
+    set({ lines: [...state.lines, { ...c, id: uid('ln_') }] });
+    idx = state.lines.length - 1;
+  }
   if (!state.targets.filter((t) => !c.tr?.[t]).length) return; // 演示课堂自带参考译文
   pending.push(idx);
   clearTimeout(flushTimer);

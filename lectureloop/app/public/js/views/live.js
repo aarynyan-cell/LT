@@ -54,9 +54,10 @@ export function Live({ route }) {
   useEffect(() => { const el = stage.current; if (el) el.scrollTop = el.scrollHeight; }, [L.lines, L.interim]);
   useEffect(() => { const up = (e) => (e.key === 'h' || e.key === 'H') && setPeek(false); window.addEventListener('keyup', up); return () => window.removeEventListener('keyup', up); }, []);
 
-  async function start(src) {
+  // acked：刚在确认框里点了“我已获得许可”。不能依赖 settings.recordingAck——这个闭包里它还是旧值，会再次弹出确认框
+  async function start(src, acked = false) {
     if (!courseId) { toast('请先选择或新建一门课程', { kind: 'warn' }); return; }
-    if (src === 'mic' && !settings.recordingAck) { setAck(true); return; }
+    if (src === 'mic' && !acked && !settings.recordingAck) { setAck(true); return; }
     try {
       document.activeElement?.blur?.();
       await live.start({ courseId, lang, title, source: src, targets: settings.targets, demoSpeed: +route.query.demoSpeed || 2.2 });
@@ -150,7 +151,7 @@ export function Live({ route }) {
       </div>`}
 
     ${ack && html`<${Modal} title="课堂录音提醒" onClose=${() => setAck(false)}
-      foot=${html`<button class="btn" onClick=${() => setAck(false)}>取消</button><button class="btn primary" onClick=${async () => { await actions.setSetting('recordingAck', true); setAck(false); start('mic'); }}>我已获得许可，开始</button>`}>
+      foot=${html`<button class="btn" onClick=${() => setAck(false)}>取消</button><button class="btn primary" onClick=${async () => { setAck(false); actions.setSetting('recordingAck', true); start('mic', true); }}>我已获得许可，开始</button>`}>
       <p>请确认你已获得<b>授课教师 / 学校</b>对课堂录音的许可。</p>
       <p class="small muted">录音只保存在本机浏览器（IndexedDB），不会上传。实时字幕使用浏览器自带的语音识别，可能由浏览器厂商的云服务处理语音。</p>
     <//>`}

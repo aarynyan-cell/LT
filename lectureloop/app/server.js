@@ -13,6 +13,7 @@ loadEnv(here);
 const { AiError, claudeEnabled, MODEL, FAST_MODEL } = await import('./server/claude.js');
 const { generateNotes, generateLanguage } = await import('./server/ai.js');
 const { translateBatch, availableProviders } = await import('./server/translate.js');
+const { handleRelay } = await import('./worker/relay.js');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -140,8 +141,17 @@ async function handleApi(req, res, url) {
   return send(res, 404, { error: { code: 'not_found', message: 'Not Found' } });
 }
 
+// ---- 中继：把 Node 的请求转成 Web Request，交给与 Cloudflare Worker 共用的 handleRelay ----
+async function handleRelayNode(req, res, url) {
+  if (limited(req.socket.remoteAddress || '', 'relay', 300)) return send(res, 429, { error: { code: 'rate_limit', message: '请求过于频繁' } });
+  const body = req.method === 'POST' ? Buffer.concat(await (async () => { const c = []; let n = 0; for await (const x of req) { n += x.length; if (n > MAX_BODY) throw badRequest('请求体过大'); c.push(x); } return c; })()) : undefined;
+  const r = await handleRelay(new Request(`http://${req.headers.host}${url.pathname}`, { method: req.method, headers: req.headers, body }), { extraHosts: process.env.RELAY_EXTRA_HOSTS || '' });
+  res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json', 'cache-control': 'no-store' });
+  res.end(Buffer.from(await r.arrayBuffer()));
+}
+
 // ---- 静态文件 ----
-const CSP = "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+const CSP = "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.anthropic.com https://api.openai.com https://generativelanguage.googleapis.com https://api.deepseek.com https://api.moonshot.cn https://open.bigmodel.cn https://dashscope.aliyuncs.com https://api.siliconflow.cn https://ark.cn-beijing.volces.com https://openrouter.ai https://api.groq.com https://api.x.ai http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
 
 function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
@@ -166,6 +176,7 @@ function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (url.pathname === '/relay') return await handleRelayNode(req, res, url);
     if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method Not Allowed', { 'content-type': 'text/plain' });
     return serveStatic(req, res, url);

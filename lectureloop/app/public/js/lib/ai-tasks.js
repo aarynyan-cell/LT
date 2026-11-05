@@ -2,6 +2,15 @@
 // 本地版由 server/ai.js 调用；在线版（浏览器自带密钥）由 lib/claude-browser.js 调用——两端行为完全一致。
 
 export const DEFAULT_MODEL = 'claude-opus-5-5';
+
+/** 容错解析：去掉 ```json 围栏，必要时截取第一个 { 到最后一个 } */
+export function parseLooseJson(text) {
+  const t = String(text ?? '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  try { return JSON.parse(t); } catch { /* 继续尝试 */ }
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a >= 0 && b > a) return JSON.parse(t.slice(a, b + 1));
+  throw new Error('no json');
+}
 // 服务端 fallbacks:"default"（beta server-side-fallback-2026-07-01）只对 Fable / Opus 5.x / Sonnet 5.5 开启；Haiku 不支持
 export const supportsServerFallback = (model) => /^claude-(fable|opus-5|sonnet-5-5)/.test(model);
 export const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
@@ -58,8 +67,11 @@ export function notesTask({ course, title, noteLang = 'zh', cues }) {
 }
 
 export function sanitizeNotes(d, n) {
+  d = d && typeof d === 'object' ? d : {};
+  const g = (a, b) => d[a] ?? d[b];
   const withRef = (list, f) => (Array.isArray(list) ? list.slice(0, 60).map((x) => ({ ...f(x), cue: clampCue(x.cue, n) })) : []);
   let parts = (Array.isArray(d.parts) ? d.parts : [])
+    .map((p) => ({ ...p, start_cue: p.start_cue ?? p.startCue }))
     .filter((p) => Number.isInteger(p.start_cue))
     .map((p) => ({ startCue: clampCue(p.start_cue, n), title: s(p.title, 120), summary: s(p.summary, 1200) }))
     .sort((a, b) => a.startCue - b.startCue)
@@ -68,7 +80,7 @@ export function sanitizeNotes(d, n) {
   return {
     overview: s(d.overview, 2000),
     parts,
-    keyPoints: withRef(d.key_points, (x) => ({ text: s(x.text) })),
+    keyPoints: withRef(g('key_points', 'keyPoints'), (x) => ({ text: s(x.text) })),
     concepts: withRef(d.concepts, (x) => ({ term: s(x.term, 120), definition: s(x.definition) })),
     formulas: withRef(d.formulas, (x) => ({ expression: s(x.expression, 300), spoken: s(x.spoken, 300), explanation: s(x.explanation) })),
     emphasized: withRef(d.emphasized, (x) => ({ text: s(x.text) })),
@@ -125,6 +137,7 @@ export function languageTask({ course, title, explainLang = 'zh', cues, glossary
 }
 
 export function sanitizeLanguage(d, cues) {
+  d = d && typeof d === 'object' ? d : {};
   const n = cues.length;
   const hay = cues.map((c) => c.t.toLowerCase());
   // 纠错：wrong 必须在原文真实出现（防幻觉），并统计出现次数与位置
@@ -148,7 +161,7 @@ export function sanitizeLanguage(d, cues) {
     kind: ['term', 'phrase', 'collocation'].includes(v.kind) ? v.kind : 'term',
     cue: clampCue(v.cue, n),
     def: { zh: s(v.def?.zh, 200), en: s(v.def?.en, 300), fr: s(v.def?.fr, 300) },
-    heardAs: (Array.isArray(v.heard_as) ? v.heard_as : []).map((x) => s(x, 80)).filter(Boolean).slice(0, 8),
+    heardAs: (Array.isArray(v.heard_as ?? v.heardAs) ? (v.heard_as ?? v.heardAs) : []).map((x) => s(x, 80)).filter(Boolean).slice(0, 8),
     status: 'new',
   })).filter((v) => v.term);
   const patterns = (Array.isArray(d.patterns) ? d.patterns : []).slice(0, 30).map((p) => ({
@@ -185,3 +198,7 @@ export function alignTranslation(items, data) {
   if (byI.size === 0) return null;
   return items.map((c) => ({ i: c.i, t: byI.get(c.i) ?? '' }));
 }
+
+/** 结构是否大致符合预期（防止把别的 JSON 当作笔记保存） */
+export const looksLikeNotes = (d) => !!d && typeof d === 'object' && ('key_points' in d || 'keyPoints' in d || 'parts' in d || 'overview' in d);
+export const looksLikeLanguage = (d) => !!d && typeof d === 'object' && ('vocab' in d || 'patterns' in d || 'corrections' in d);

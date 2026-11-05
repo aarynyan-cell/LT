@@ -17,6 +17,7 @@ const S = await import(L + 'srs.js');
 const D = await import(L + 'diff.js');
 const A = await import(L + 'ai-tasks.js');
 const V = await import(L + 'voices.js');
+const U = await import(L + 'utterance.js');
 
 // ---------- text ----------
 test('splitSentences: 句末标点、缩写、小数', () => {
@@ -310,6 +311,87 @@ test('语音：长句为在线语音分段（≤140 字符、不丢字）', () =
   assert.ok(parts.length >= 2 && parts.every((p) => p.length <= 140), parts.map((p) => p.length).join());
   assert.equal(parts.join(' ').replace(/\s+/g, ' '), long.replace(/\s+/g, ' ').trim());
   assert.deepEqual(V.chunkForTts('Short one.'), ['Short one.']);
+});
+
+// ---------- 实时识别：话语跟踪器（Chrome 把未定稿的临时字幕直接换成下一句时不能丢字、时间要可靠）----------
+const track = () => {
+  const out = [], interims = [];
+  const tr = new U.UtteranceTracker({ onInterim: (t) => interims.push(t), onFinal: (c) => out.push(c) });
+  return { tr, out, interims };
+};
+const ev = (text, final = false) => [{ text, final }];
+
+test('话语跟踪：正常"临时→定稿"得到一句，开始=首次出现，结束=最后一次更新', () => {
+  const { tr, out } = track();
+  tr.feed(ev('So now we look'), 10); tr.feed(ev('So now we look at the margin'), 12); tr.feed(ev('So now we look at the margin of the classifier'), 14);
+  tr.feed(ev('So now we look at the margin of the classifier', true), 16); // 定稿比最后一次更新晚到 2 秒
+  assert.equal(out.length, 1);
+  assert.equal(out[0].start, 10);
+  assert.ok(out[0].end >= 14 && out[0].end <= 14.9, `结束 ${out[0].end}`);   // 定稿晚到 2 秒：取 max(最后更新, 定稿-1.2)
+  assert.ok(!out[0].provisional);
+});
+
+test('话语跟踪：临时字幕被下一句直接替换（没有定稿）时，上一句不会丢', () => {
+  const { tr, out } = track();
+  tr.feed(ev('In that case we do your'), 111); tr.feed(ev('In that case we do your research you use the lps'), 114);
+  tr.feed(ev('It is better than what we said so'), 137);       // 引擎丢弃了上一个假设，没有 isFinal
+  tr.feed(ev('It is better than what we said so here we are mostly synonymous'), 140);
+  tr.feed(ev('It is better than what we said so here we are mostly synonymous together', true), 142);
+  assert.equal(out.length, 2, JSON.stringify(out));
+  assert.match(out[0].text, /^In that case we do your research/);
+  assert.equal(out[0].provisional, true);
+  assert.deepEqual([out[0].start, out[0].end], [111, 114]);
+  assert.match(out[1].text, /^It is better than/);
+  assert.equal(out[1].start, 137);                              // 不是 111：开始时间没有被旧假设拖住
+  assert.ok(out[1].start >= out[0].end);
+});
+
+test('话语跟踪：开头的噪音假设不会污染下一句的开始时间；太短的噪音不保存', () => {
+  const { tr, out } = track();
+  tr.feed(ev('the'), 100);                                       // 噪音，随后被替换
+  tr.feed(ev('so now we look at the margin and the support vectors'), 125);
+  tr.feed(ev('so now we look at the margin and the support vectors', true), 131);
+  assert.equal(out.length, 1);                                    // "the" 只有 1 个词：不保存
+  assert.ok(out[0].start >= 124 && out[0].start <= 126.5, `开始 ${out[0].start}`);   // 125 附近（不是 115.8）
+  assert.ok(out[0].end >= 129 && out[0].end <= 131, `结束 ${out[0].end}`);
+});
+
+test('话语跟踪：时长不合理（语速过低）时把陈旧的开始时间推迟', () => {
+  const { tr, out } = track();
+  // 17 个词，却从 111 秒持续到 137 秒（0.65 词/秒）：中间有 ~19 秒没有文字
+  tr.feed(ev('in that case we do your research'), 111);
+  tr.feed(ev('in that case we do your research you use the lps can you yeah some violations and you allow together'), 137);
+  tr.feed(ev('in that case we do your research you use the lps can you yeah some violations and you allow together', true), 138);
+  const c = out[0];
+  assert.ok(c.end - c.start <= 20 / 1.2 + 0.01, `时长 ${c.end - c.start}`);   // 20 个词，语速不低于 1.2 词/秒
+  assert.ok(c.end >= 137 && c.end <= 138, `结束 ${c.end}`);
+});
+
+test('话语跟踪：flush（识别结束 / 暂停 / 停止）保存未定稿的假设；随后相似的定稿替换它而不是重复', () => {
+  const { tr, out, interims } = track();
+  tr.feed(ev('okay so the margin is the distance between'), 50);
+  tr.flush();
+  assert.equal(out.length, 1); assert.equal(out[0].provisional, true); assert.equal(interims.at(-1), '');
+  tr.feed(ev('okay so the margin is the distance between the two lines', true), 53);   // 引擎迟到的定稿
+  assert.equal(out.length, 2); assert.equal(out[1].replace, true);                      // 通知调用方替换上一句
+  tr.feed(ev('something completely different here today', true), 70);
+  assert.ok(!out[2].replace);
+});
+
+test('话语跟踪：长定稿按句拆分，时间连续且覆盖整段', () => {
+  const { tr, out } = track();
+  tr.feed(ev('First sentence is right here. Second sentence follows it now. Third one ends the thing.', true), 30);
+  assert.ok(out.length >= 2);
+  for (let k = 1; k < out.length; k++) assert.ok(Math.abs(out[k].start - out[k - 1].end) < 1e-9);
+  assert.ok(out.every((c) => c.end > c.start));
+});
+
+test('话语跟踪：isRevision 区分"修订"与"另一句话"', () => {
+  assert.equal(U.isRevision('in that case', 'in that case we do'), true);
+  assert.equal(U.isRevision('in that case we do your research', 'in that case we do the research you use'), true);
+  assert.equal(U.isRevision('in that case we do your research', 'it is better than what we said'), false);
+  assert.equal(U.isRevision('in that case we do your research', 'so'), false);
+  assert.equal(U.isRevision('the', 'so now we look at the margin'), false);   // 单个词碰巧出现在新句里，不是修订
 });
 
 // ---------- 真实样本（可选）----------

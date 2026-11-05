@@ -3,7 +3,8 @@ import { useStore, actions, toast } from '../store.js';
 import { download } from '../lib/util.js';
 import { asrSupported, micSupported } from '../lib/asr.js';
 import { LANGS } from '../components/ui.js';
-import { byok, MODELS, maskKey } from '../lib/byok.js';
+import { byok } from '../lib/byok.js';
+import { PROVIDERS, detectProvider, maskKey } from '../lib/providers.js';
 import { aiSource } from '../lib/api.js';
 import { listForLang, pickVoice, TIER_LABEL, SAMPLE } from '../lib/voices.js';
 
@@ -65,40 +66,85 @@ function VoiceCard({ settings }) {
   </div>`;
 }
 
+const CONF = { high: '把握较大', medium: '可能', low: '不确定' };
+
+/** API 密钥：一个输入框，按格式自动识别服务商，并向服务商发一次请求验证；可保存多个，分别指定“笔记/词汇”和“实时翻译”用哪个 */
 function ByokCard({ config }) {
   const [key, setKey] = useState('');
-  const [model, setModel] = useState(byok.model);
-  const [fast, setFast] = useState(byok.fastModel);
-  const [test, setTest] = useState(null); // { ok, text }
+  const [forced, setForced] = useState('');      // 高级：手动指定服务商
+  const [base, setBase] = useState('');
+  const [model, setModel] = useState('');
   const [busy, setBusy] = useState(false);
-  const saved = byok.key;
-  const save = () => {
-    if (key.trim()) byok.setKey(key);
-    byok.setModels(model, fast);
-    setKey(''); setTest(null);
-    actions.touchConfig();
-    toast(key.trim() ? '已保存密钥（仅存于本浏览器）' : '已保存模型设置');
-  };
-  const clear = () => { byok.clear(); setTest(null); actions.touchConfig(); toast('已从本浏览器清除 Claude 密钥'); };
-  const runTest = async () => {
-    setBusy(true); setTest(null);
-    try { const t = await (await import('../lib/claude-browser.js')).testKey(); setTest({ ok: true, text: `连接成功：“${t}”` }); }
-    catch (e) { setTest({ ok: false, text: e.message }); }
-    finally { setBusy(false); }
-  };
-  return html`<div class="card"><h2>在浏览器中使用 Claude</h2>
-    ${config?.claude ? html`<p class="small">本地服务已经配置了 Claude（优先使用服务端密钥），这里<b>可以不填</b>。</p>` : html`<p class="small muted">在线版没有后端：填入你<b>自己的</b> Claude API 密钥后，笔记归纳、词汇句式和实时翻译会由浏览器直接调用 Claude。</p>`}
-    <div class="field"><label>Claude API 密钥 ${saved ? html`<span class="badge ok">已保存 ${maskKey(saved)}</span>` : ''}</label>
-      <input type="password" autocomplete="off" spellcheck="false" placeholder=${saved ? '输入新密钥以替换' : 'sk-ant-…'} value=${key} onInput=${(e) => setKey(e.target.value)} /></div>
-    <div class="row wrap" style="gap:12px">
-      <div class="field grow"><label>笔记 / 词汇模型</label><select value=${model} onChange=${(e) => setModel(e.target.value)}>${MODELS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select></div>
-      <div class="field grow"><label>实时翻译模型（建议 Haiku 5.5）</label><select value=${fast} onChange=${(e) => setFast(e.target.value)}>${MODELS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select></div>
-    </div>
-    <div class="row wrap"><button class="btn primary" onClick=${save}>保存</button>
-      <button class="btn" disabled=${!saved || busy} onClick=${runTest}>${busy ? html`<span class="spin"></span> 测试中…` : '测试连接'}</button>
-      ${saved ? html`<button class="btn danger ghost" onClick=${clear}>清除密钥</button>` : ''}</div>
-    ${test ? html`<div class=${'small ' + (test.ok ? '' : 'muted')} style=${`margin-top:8px;color:var(${test.ok ? '--ok' : '--stuck'})`}>${test.ok ? '✓ ' : '✕ '}${test.text}</div>` : ''}
-    <p class="tiny muted" style="margin-top:10px">密钥只保存在<b>当前浏览器</b>（localStorage），由浏览器直接发送到 api.anthropic.com，不经过任何其他服务器，也不会进入备份文件。请勿在公共电脑上保存；建议在 Anthropic Console 为这个密钥设置用量上限。</p>
+  const [msg, setMsg] = useState(null);          // { ok, text }
+  const [test, setTest] = useState({});          // { [id]: { busy, ok, text } }
+  const [, bump] = useState(0);
+  const refresh = () => { bump((n) => n + 1); actions.touchConfig(); };
+
+  const cands = forced ? [{ id: forced, confidence: 'high' }] : detectProvider(key);
+  const saved = byok.all();
+  const use = byok.use();
+  const need = forced && PROVIDERS[forced];
+
+  async function save() {
+    setBusy(true); setMsg(null);
+    try {
+      const { probeKey } = await import('../lib/llm-client.js');
+      const r = await probeKey(key.trim(), { candidates: forced ? [forced] : undefined, base: base.trim() || undefined });
+      if (!r.ok) {
+        const auth = r.tried.filter((t) => t.code === 'auth').map((t) => PROVIDERS[t.id].name);
+        const net = r.tried.filter((t) => t.code === 'network').map((t) => PROVIDERS[t.id].name);
+        setMsg({ ok: false, text: !r.tried.length ? '无法从格式识别这个密钥：请展开“高级”手动选择服务商。' : `验证失败。${auth.length ? `被拒绝（密钥无效或无权限）：${auth.join('、')}。` : ''}${net.length ? `无法连接：${net.join('、')}（网络问题，或浏览器跨域被拦截——本地版或在线版的中继可以解决）。` : ''}` });
+        return;
+      }
+      const picked = { main: model.trim() || r.main || '', fast: model.trim() || r.fast || '' };
+      if (!picked.main) { setMsg({ ok: false, text: `已连通 ${PROVIDERS[r.id].name}，但没能自动选出模型，请在“高级”里填写模型名后再保存。` }); return; }
+      byok.save(r.id, { key: key.trim(), model: picked.main, fastModel: picked.fast, models: r.models.slice(0, 300), ...(base.trim() ? { base: base.trim() } : {}) });
+      setKey(''); setBase(''); setModel(''); setForced('');
+      setMsg({ ok: true, text: `✓ 已连接 ${PROVIDERS[r.id].name}：笔记/词汇用 ${picked.main}，实时翻译用 ${picked.fast}（可在下方修改）` });
+      refresh();
+    } catch (e) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
+  }
+  async function runTest(id) {
+    setTest((t) => ({ ...t, [id]: { busy: true } }));
+    try { const { testProvider } = await import('../lib/llm-client.js'); const t = await testProvider(id); setTest((x) => ({ ...x, [id]: { ok: true, text: `连接成功：“${t}”` } })); }
+    catch (e) { setTest((x) => ({ ...x, [id]: { ok: false, text: e.message } })); }
+  }
+  const setField = (id, patch) => { byok.save(id, patch); refresh(); };
+
+  return html`<div class="card"><h2>API 密钥 <span class="muted small">（笔记、词汇、实时翻译）</span></h2>
+    ${config?.claude ? html`<p class="small">本地服务已经配置了 Claude（优先使用服务端密钥），这里<b>可以不填</b>。</p>` : html`<p class="small muted">粘贴任意常见服务商的密钥，会自动识别并验证：Claude、OpenAI、Google Gemini、DeepSeek、Kimi、智谱 GLM、通义千问、豆包、硅基流动、OpenRouter、Groq、xAI…… 没有密钥时使用离线版。</p>`}
+    <div class="field"><label>粘贴密钥</label>
+      <input type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…  /  sk-…  /  AIza…" value=${key} onInput=${(e) => setKey(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && key.trim() && save()} /></div>
+    ${key.trim() ? html`<div class="small" style="margin:-4px 0 8px">${cands.length ? html`${forced ? '已指定：' : cands.length === 1 && cands[0].confidence === 'high' ? '识别为：' : '可能是：'}${cands.map((c) => html`<span class="badge acc" key=${c.id} title=${CONF[c.confidence]} style="margin-right:4px">${PROVIDERS[c.id].name}${PROVIDERS[c.id].cors === 'unknown' || PROVIDERS[c.id].id === 'custom' ? ' · 实验性' : ''}</span>`)}${cands.length > 1 ? html`<span class="muted tiny">保存时会逐个向服务商验证</span>` : ''}` : html`<span class="muted">无法从格式识别，请展开“高级”手动选择服务商</span>`}</div>` : ''}
+    <details style="margin-bottom:8px"><summary class="small">高级：手动指定服务商 / 自定义地址 / 手填模型</summary>
+      <div class="row wrap" style="gap:10px;margin-top:6px">
+        <div class="field grow"><label>服务商</label><select value=${forced} onChange=${(e) => setForced(e.target.value)}><option value="">自动识别</option>${Object.entries(PROVIDERS).map(([id, p]) => html`<option value=${id}>${p.name}</option>`)}</select></div>
+        <div class="field grow"><label>Base URL${need?.needsBase ? '（必填）' : '（可选）'}</label><input value=${base} placeholder=${need?.base || 'https://…/v1'} onInput=${(e) => setBase(e.target.value)} /></div>
+        <div class="field grow"><label>模型${need?.needsModel ? '（必填）' : '（可选，留空自动选择）'}</label><input value=${model} onInput=${(e) => setModel(e.target.value)} /></div>
+      </div>
+      ${need?.note ? html`<div class="tiny muted">${need.note}</div>` : ''}</details>
+    <div class="row wrap"><button class="btn primary" disabled=${busy || !key.trim()} onClick=${save}>${busy ? html`<span class="spin"></span> 验证中…` : '保存并验证'}</button></div>
+    ${msg ? html`<div class="small" style=${`margin-top:8px;color:var(${msg.ok ? '--ok' : '--stuck'})`}>${msg.text}</div>` : ''}
+
+    ${Object.keys(saved).length ? html`<div class="nsec" style="margin-top:14px"><h3>已保存的密钥</h3>
+      ${Object.entries(saved).map(([id, e]) => {
+        const p = PROVIDERS[id];
+        const opts = [...new Set([...(e.models || []), e.model, e.fastModel].filter(Boolean))];
+        const sel = (field, val) => opts.length ? html`<select value=${val || ''} onChange=${(ev) => setField(id, { [field]: ev.target.value })}>${opts.map((m) => html`<option value=${m}>${m}</option>`)}</select>` : html`<input value=${val || ''} onChange=${(ev) => setField(id, { [field]: ev.target.value })} />`;
+        const t = test[id];
+        return html`<div class="vcard" key=${id}>
+          <div class="row wrap"><b>${p.name}</b><span class="badge ok">${maskKey(e.key)}</span>${p.cors === 'unknown' || id === 'custom' ? html`<span class="badge warn" title="尚未用真实密钥验证过这个服务商">实验性</span>` : ''}
+            <button class="btn sm right" disabled=${t?.busy} onClick=${() => runTest(id)}>${t?.busy ? '测试中…' : '测试'}</button>
+            <button class="btn sm danger ghost" onClick=${() => { byok.remove(id); refresh(); }}>删除</button></div>
+          <div class="row wrap" style="gap:10px;margin-top:6px">
+            <label class="row small"><input type="radio" name="use-main" checked=${use.main === id} onChange=${() => { byok.setUse('main', id); refresh(); }} /> 用于笔记 / 词汇</label>
+            <label class="row small"><input type="radio" name="use-fast" checked=${use.fast === id} onChange=${() => { byok.setUse('fast', id); refresh(); }} /> 用于实时翻译</label></div>
+          <div class="row wrap" style="gap:10px;margin-top:6px">
+            <div class="field grow" style="margin:0"><label>笔记 / 词汇模型</label>${sel('model', e.model)}</div>
+            <div class="field grow" style="margin:0"><label>实时翻译模型（建议选便宜、快的）</label>${sel('fastModel', e.fastModel)}</div></div>
+          ${t && !t.busy ? html`<div class="small" style=${`margin-top:6px;color:var(${t.ok ? '--ok' : '--stuck'})`}>${t.ok ? '✓ ' : '✕ '}${t.text}</div>` : ''}</div>`;
+      })}</div>` : ''}
+    <p class="tiny muted" style="margin-top:10px">密钥只保存在<b>当前浏览器</b>（localStorage），不会进入备份文件。请求直接发往对应服务商；个别服务商不允许浏览器直连时，会经由<b>你自己部署的同源中继</b>转发（只允许白名单主机，不记录密钥）。请勿在公共电脑上保存；建议在服务商控制台为密钥设置用量上限。除 Claude 外，其它服务商尚未用真实密钥验证过，遇到问题请把提示发给我。</p>
   </div>`;
 }
 
@@ -132,13 +178,13 @@ export function Settings() {
   const src = aiSource();
   return html`<div class="page">
     <div class="page-head"><h1>设置</h1></div>
-    ${config && !config.server ? html`<div class="banner" style="border-radius:10px;margin-bottom:14px">🌐 你正在使用<b>在线版</b>（没有后端）。课程数据只保存在这个浏览器里；AI 功能需要在下方填入你自己的 Claude 密钥。需要本地版：下载仓库后双击 <code>start-mac.command</code>（Windows：<code>start-windows.bat</code>）。</div>` : ''}
+    ${config && !config.server ? html`<div class="banner" style="border-radius:10px;margin-bottom:14px">🌐 你正在使用<b>在线版</b>（没有后端）。课程数据只保存在这个浏览器里；AI 功能需要在下方填入你自己的 API 密钥。需要本地版：下载仓库后双击 <code>start-mac.command</code>（Windows：<code>start-windows.bat</code>）。</div>` : ''}
 
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
       <div class="card"><h2>服务状态</h2>
-        <${Status} ok=${!!src} label=${'Claude' + (src === 'server' ? ` · 本地服务 · ${config.model}` : src === 'browser' ? ` · 浏览器密钥 · ${byok.model}` : '')} hint=${src ? '笔记归纳 / 词汇句式 / 翻译可用' : config?.server ? '未配置：在 app/.env 填 ANTHROPIC_API_KEY 后重启，或在下方填入你自己的密钥（否则使用离线版）' : '未配置：在下方填入你自己的 Claude 密钥（否则使用离线版）'} />
+        <${Status} ok=${!!src} label=${'AI' + (src === 'server' ? ` · 本地服务 · ${config.model}` : src === 'browser' ? ` · ${PROVIDERS[byok.sel('main')?.id]?.name || ''} · ${byok.sel('main')?.model || ''}` : '')} hint=${src ? '笔记归纳 / 词汇句式 / 翻译可用' : config?.server ? '未配置：在 app/.env 填 ANTHROPIC_API_KEY 后重启，或在下方填入你自己的密钥（否则使用离线版）' : '未配置：在下方填入你自己的 API 密钥（否则使用离线版）'} />
         ${config?.server ? html`<${Status} ok=${config?.translate?.google} label="Google Translate" hint=${config?.translate?.google ? '实时翻译优先使用' : '未配置 GOOGLE_TRANSLATE_API_KEY（可选）'} />` : ''}
-        <${Status} ok=${config?.translateAny || !!byok.key || caps.tr} label="实时翻译" hint=${config?.translateAny ? '本地服务翻译可用' + (config?.claude && !config?.translate?.google ? `（Claude：${config.fastModel}）` : '') : byok.key ? `浏览器直连 Claude（${byok.fastModel}）` : caps.tr ? '将尝试浏览器内置翻译（实验性）' : '无翻译服务：上课时只显示原文'} />
+        <${Status} ok=${config?.translateAny || byok.has || caps.tr} label="实时翻译" hint=${config?.translateAny ? '本地服务翻译可用' + (config?.claude && !config?.translate?.google ? `（Claude：${config.fastModel}）` : '') : byok.has ? `浏览器直连 ${PROVIDERS[byok.sel('fast')?.id]?.name || ''}（${byok.sel('fast')?.model || ''}）` : caps.tr ? '将尝试浏览器内置翻译（实验性）' : '无翻译服务：上课时只显示原文'} />
         <${Status} ok=${caps.asr} label="浏览器语音识别（Web Speech）" hint=${caps.asr ? '可用。注意：识别可能由浏览器厂商的云端完成' : '不可用（Firefox 等）：请用 Chrome / Edge / Safari，或使用演示课堂/导入'} />
         <${Status} ok=${caps.mic} label="麦克风录音" hint=${caps.mic ? '可用（需 localhost 或 https）' : '不可用'} />
         <${Status} ok=${caps.tts && settings.ttsMode !== 'off'} label="朗读（无录音时的播放兜底）" hint=${caps.tts ? (settings.ttsMode === 'off' ? '已关闭，使用静音计时' : '见下方“朗读语音”：自动模式只在有自然语音时启用') : '不可用，将使用静音计时'} />
