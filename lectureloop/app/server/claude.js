@@ -1,6 +1,7 @@
 // Claude 调用封装：结构化 JSON 输出 + 流式 + 拒答/截断处理 + 服务端回退。
 // 使用官方 SDK（@anthropic-ai/sdk）。密钥来自环境变量 ANTHROPIC_API_KEY，绝不下发到浏览器。
 import Anthropic from '@anthropic-ai/sdk';
+import { DEFAULT_MODEL, supportsServerFallback, FALLBACK_BETA } from '../public/js/lib/ai-tasks.js';
 
 export class AiError extends Error {
   constructor(code, message, status = 502) {
@@ -12,15 +13,14 @@ export class AiError extends Error {
 
 export const claudeEnabled = () => !!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
 // 默认主模型：Claude Opus 5.5。可用环境变量覆盖；CLAUDE_MODEL_FAST 用于低延迟的批量翻译（建议 claude-haiku-5-5）。
-export const MODEL = () => process.env.CLAUDE_MODEL || 'claude-opus-5-5';
+export const MODEL = () => process.env.CLAUDE_MODEL || DEFAULT_MODEL;
 export const FAST_MODEL = () => process.env.CLAUDE_MODEL_FAST || MODEL();
 
 let client;
 const getClient = () => (client ??= new Anthropic()); // 读取 ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
 
-// 服务端 fallbacks:"default"（beta server-side-fallback-2026-07-01）：安全分类器误拒时由 API 自动换模型重试。
-// Haiku 不支持该参数，故只对 Fable / Opus 5.x / Sonnet 5.5 开启。可设 CLAUDE_SERVER_FALLBACK=off 关闭。
-const supportsFallback = (model) => /^claude-(fable|opus-5|sonnet-5-5)/.test(model);
+// 服务端 fallbacks:"default"：安全分类器误拒时由 API 自动换模型重试（规则见 ai-tasks.js）。可设 CLAUDE_SERVER_FALLBACK=off 关闭。
+const supportsFallback = supportsServerFallback;
 
 async function runStream(c, params, beta) {
   const stream = beta ? c.beta.messages.stream(params) : c.messages.stream(params);
@@ -47,7 +47,7 @@ export async function askJson({ model = MODEL(), system, user, schema, effort = 
   let msg;
   try {
     msg = useFallback
-      ? await runStream(c, { ...base, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, true)
+      ? await runStream(c, { ...base, betas: [FALLBACK_BETA], fallbacks: 'default' }, true)
       : await runStream(c, base, false);
   } catch (e) {
     // 若账号/网关不接受 fallback beta，退回普通请求重试一次

@@ -4,6 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { loadEnv } from './server/env.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -140,7 +141,7 @@ async function handleApi(req, res, url) {
 }
 
 // ---- 静态文件 ----
-const CSP = "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+const CSP = "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.anthropic.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
 
 function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
@@ -173,11 +174,47 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
+// ---- 启动：--open 自动打开浏览器；端口被占用时先判断是否已有 LectureLoop 在运行 ----
+const OPEN = process.argv.includes('--open');
+const explicitPort = !!process.env.PORT;
+let port = PORT;
+
+function openBrowser(url) {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+  try {
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    child.on('error', () => console.log(`  请在浏览器中打开：${url}`)); // 找不到浏览器命令时不要让服务崩溃
+    child.unref();
+  } catch { console.log(`  请在浏览器中打开：${url}`); }
+}
+const urlOf = (p) => `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${p}`;
+
+server.on('error', async (e) => {
+  if (e.code !== 'EADDRINUSE') { console.error('启动失败：', e.message); process.exit(1); }
+  // 已经有 LectureLoop 在这个端口运行 → 直接打开它（浏览器数据按端口隔离，换端口会"看不到"原来的课程）
+  try {
+    const r = await fetch(`${urlOf(port)}/api/config`, { signal: AbortSignal.timeout(1500) });
+    const j = await r.json();
+    if (j?.version) {
+      console.log(`\n  LectureLoop 已经在运行：${urlOf(port)}\n`);
+      if (OPEN) openBrowser(urlOf(port));
+      process.exit(0);
+    }
+  } catch { /* 不是 LectureLoop */ }
+  if (explicitPort || port >= PORT + 10) { console.error(`端口 ${port} 被其他程序占用。可设置环境变量 PORT 换一个端口。`); process.exit(1); }
+  port += 1;
+  console.warn(`  端口 ${port - 1} 被其他程序占用，改用 ${port}（注意：不同端口下浏览器里保存的课程数据是分开的）`);
+  server.listen(port, HOST);
+});
+
+server.on('listening', () => {
   const p = availableProviders();
-  console.log(`\n  LectureLoop  →  http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
-  console.log(`  Claude        ${claudeEnabled() ? `✔ ${MODEL()}  (翻译: ${FAST_MODEL()})` : '✘ 未配置 ANTHROPIC_API_KEY（笔记/词汇将使用离线版）'}`);
+  console.log(`\n  LectureLoop  →  ${urlOf(port)}\n`);
+  console.log(`  Claude        ${claudeEnabled() ? `✔ ${MODEL()}  (翻译: ${FAST_MODEL()})` : '✘ 未配置 ANTHROPIC_API_KEY（可在网页“设置”里填自己的密钥，或使用离线版）'}`);
   console.log(`  Google 翻译    ${p.google ? '✔' : '✘ 未配置 GOOGLE_TRANSLATE_API_KEY'}`);
   if (HOST !== '127.0.0.1' && HOST !== 'localhost') console.log('  ⚠ 服务监听在非本机地址，请确认网络环境可信（接口会使用你的密钥）。');
-  console.log('');
+  console.log('\n  关闭这个窗口（或按 Ctrl+C）即可停止。\n');
+  if (OPEN) openBrowser(urlOf(port));
 });
+
+server.listen(port, HOST);

@@ -2,7 +2,7 @@
 import { html, useState, useEffect, useRef } from '../h.js';
 import { useStore, actions, navigate, lessonUrl, toast, getCourse } from '../store.js';
 import { LiveSession, asrSupported, micSupported } from '../lib/asr.js';
-import { translate } from '../lib/api.js';
+import { translate, translateAvailable } from '../lib/api.js';
 import { buildSeed } from '../lib/seed.js';
 import { fmtTime, fmtDate, uid } from '../lib/util.js';
 import { Modal, LANGS, useHotkeys } from '../components/ui.js';
@@ -240,7 +240,7 @@ export function Live({ route }) {
           <li>下课点 <b>结束并归档</b>：进入 Studio，把卡点变成精听练习。</li>
         </ol>
         ${!canMic ? html`<div class="banner warn" style="border-radius:8px">此浏览器不支持实时语音识别或录音（建议使用桌面版 Chrome / Edge，并通过 localhost 或 https 访问）。可以先用“演示课堂”体验完整流程，或在课程库导入转录。</div>` : ''}
-        <div class="tiny muted" style="margin-top:8px">提示：浏览器的语音识别可能由浏览器厂商的云服务处理；录音只保存在本机。${config && !config.translateAny ? ' 当前未配置后端翻译服务，实时译文可能不可用（演示课堂自带参考译文）。' : ''}</div>
+        <div class="tiny muted" style="margin-top:8px">提示：浏览器的语音识别可能由浏览器厂商的云服务处理；录音只保存在本机。${config && !translateAvailable() ? ' 当前没有可用的翻译服务，实时译文不可用（演示课堂自带参考译文；可在“设置”里填入 Claude 密钥）。' : ''}</div>
       </div></div>`
     : html`<div class=${'stage' + (settings.fadeOriginal ? ' fade' : '') + (peek ? ' peek' : '')} ref=${stage} style=${`font-size:${settings.fontSize}px`} aria-live="polite">
         ${shown.map((l, k) => html`<div class=${'ln' + (k < shown.length - 1 ? ' old' : '')} key=${l.id}>

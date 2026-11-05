@@ -7,7 +7,7 @@ import { newSrs, review, queue } from './lib/srs.js';
 import { segmentParts, applyAnchors, cueAt, estimateTimeline } from './lib/text.js';
 import { titleParts, offlineNotes, offlineVocab, detectPatterns } from './lib/heuristics.js';
 import { rulesFor, scanCorrections, applyCorrection, revertCorrection, DOMAIN } from './lib/glossary.js';
-import { getConfig, aiNotes, aiLanguage } from './lib/api.js';
+import { getConfig, aiNotes, aiLanguage, setApiConfig, aiAvailable } from './lib/api.js';
 
 export const DEFAULTS = {
   srcLang: 'en', targets: ['zh'], fontSize: 30, fadeOriginal: false, hideFillers: false, showTr: true,
@@ -97,7 +97,7 @@ export async function boot() {
   const settings = { ...DEFAULTS, ...saved };
   setState({ dbMode: mode, courses, lessons, clips, tags, settings });
   if (!settings.seeded && !courses.length && !lessons.length) await loadSeed();
-  getConfig().then((config) => setState({ config }));
+  getConfig().then((config) => { setApiConfig(config); setState({ config }); });
   window.addEventListener('hashchange', () => setState({ route: parseRoute() }));
   setState({ ready: true });
   if (mode === 'memory') toast('浏览器禁用了本地数据库（隐私模式？）：本次的修改在刷新后会丢失', { kind: 'warn', ms: 12000 });
@@ -294,7 +294,7 @@ export const actions = {
     try {
       const lesson = getLesson(lessonId), course = getCourse(lesson.courseId), cues = await getCues(lessonId);
       let parts = lesson.parts, notes = null, source = 'offline', model = null, fallbackReason = null;
-      if (state.config?.claude) {
+      if (aiAvailable()) {
         try {
           const r = await aiNotes({ course: course?.name, title: lesson.title, noteLang: state.settings.noteLang, cues: cues.map((c) => ({ i: c.i, t: c.text })) });
           const n = r.notes;
@@ -305,7 +305,7 @@ export const actions = {
           fallbackReason = e.message;
           toast(`AI 这次没有返回结果（${e.message}）。已生成离线版，可稍后重试。`, { kind: 'warn', ms: 8000 });
         }
-      } else fallbackReason = '未配置 Claude 密钥';
+      } else fallbackReason = '未配置 Claude 密钥（可在“设置”里填写）';
       if (!notes) {
         const off = offlineNotes(cues, parts);
         parts = parts.map((p) => ({ ...p, summary: p.summary || off.partSummaries[p.id] || '' })); // 只填补空白，不覆盖已有摘要
@@ -332,7 +332,7 @@ export const actions = {
       const lesson = getLesson(lessonId), course = getCourse(lesson.courseId), cues = await getCues(lessonId);
       const prevVocab = new Map((lesson.language?.vocab || []).map((v) => [v.term.toLowerCase(), v.status]));
       let vocab, patterns, extraCorr = [], source = 'offline', model = null, fallbackReason = null;
-      if (state.config?.claude) {
+      if (aiAvailable()) {
         try {
           const r = await aiLanguage({ course: course?.name, title: lesson.title, explainLang: state.settings.noteLang, cues: cues.map((c) => ({ i: c.i, t: c.text })), glossary: (course?.glossary || []).map((g) => g.term) });
           vocab = r.language.vocab; patterns = r.language.patterns; extraCorr = r.language.corrections;
@@ -341,7 +341,7 @@ export const actions = {
           fallbackReason = e.message;
           toast(`AI 这次没有返回结果（${e.message}）。已生成离线版，可稍后重试。`, { kind: 'warn', ms: 8000 });
         }
-      } else fallbackReason = '未配置 Claude 密钥';
+      } else fallbackReason = '未配置 Claude 密钥（可在“设置”里填写）';
       if (!vocab) { vocab = offlineVocab(cues, course?.glossary || []); patterns = detectPatterns(cues); }
       vocab = vocab.map((v) => ({ ...v, status: prevVocab.get(v.term.toLowerCase()) || v.status || 'new' }));
       // 纠错：保留已有条目（含已采纳/已忽略），追加离线规则扫描与 AI 新发现的建议（按 wrong 去重）
@@ -424,6 +424,8 @@ export const actions = {
     toast('示例数据已删除');
   },
   setUi(patch) { setState((s) => ({ ui: { ...s.ui, ...patch } })); },
+  /** 浏览器密钥变化后让依赖 AI 可用性的界面重新渲染 */
+  touchConfig() { setState((s) => ({ config: { ...(s.config || {}) } })); },
 };
 
 // 笔记字段更新（概览等）

@@ -15,6 +15,7 @@ const Z = await import(L + 'zip.js');
 const H = await import(L + 'heuristics.js');
 const S = await import(L + 'srs.js');
 const D = await import(L + 'diff.js');
+const A = await import(L + 'ai-tasks.js');
 
 // ---------- text ----------
 test('splitSentences: 句末标点、缩写、小数', () => {
@@ -225,6 +226,41 @@ test('offlineNotes: 结构完整且 cue 有效', () => {
   for (const list of [n.keyPoints, n.concepts, n.formulas, n.emphasized, n.questions]) for (const x of list) assert.ok(Number.isInteger(x.cue) && x.cue >= 0 && x.cue < cues.length);
   assert.ok(n.concepts.some((c) => /split/.test(c.term)));
   assert.ok(n.emphasized.length >= 1);
+});
+
+// ---------- AI 任务（服务端与浏览器共用）----------
+test('sanitizeLanguage：丢弃原文里不存在的纠错（防幻觉）并统计次数', () => {
+  const cues = [{ i: 0, t: 'the dog product is here' }, { i: 1, t: 'Dog product again' }, { i: 2, t: 'nothing' }];
+  const r = A.sanitizeLanguage({
+    corrections: [{ wrong: 'dog product', right: 'dot product', reason: '近音' }, { wrong: 'made up phrase', right: 'x', reason: '' }, { wrong: 'same', right: 'SAME', reason: '' }],
+    vocab: [{ term: 'dot product', pos: 'n.', kind: 'weird', cue: 99, def: { zh: '点积', en: 'x', fr: 'y' }, heard_as: ['dog product'] }],
+    patterns: [{ fn: 'nope', template: 'Keep in mind that …', explain: '', cue: -3, extensions: [] }],
+  }, cues);
+  assert.deepEqual(r.corrections.map((c) => [c.wrong, c.count, c.cues]), [['dog product', 2, [0, 1]]]);
+  assert.equal(r.vocab[0].kind, 'term');
+  assert.equal(r.vocab[0].cue, 2); // 越界裁剪
+  assert.equal(r.patterns[0].fn, 'introduce');
+  assert.equal(r.patterns[0].cue, 0);
+});
+
+test('sanitizeNotes：片段排序去重、首段从 0 开始、cue 裁剪', () => {
+  const n = A.sanitizeNotes({ overview: ' x ', parts: [{ start_cue: 5, title: 'b', summary: '' }, { start_cue: 2, title: 'a', summary: '' }, { start_cue: 5, title: 'dup', summary: '' }],
+    key_points: [{ text: 'k', cue: 500 }], concepts: [], formulas: [], emphasized: [], questions: [] }, 10);
+  assert.deepEqual(n.parts.map((p) => [p.startCue, p.title]), [[0, 'a'], [5, 'b']]);
+  assert.equal(n.keyPoints[0].cue, 9);
+  assert.equal(n.overview, 'x');
+});
+
+test('translateTask / alignTranslation：按输入对齐，缺行留空，全空返回 null', () => {
+  const items = [{ i: 3, t: 'Hello' }, { i: 4, t: 'World' }];
+  const task = A.translateTask({ items, source: 'en', target: 'zh', context: ['prev'] });
+  assert.match(task.user, /3\|Hello/);
+  assert.match(task.system, /Simplified Chinese/);
+  assert.equal(task.effort, 'low');
+  assert.deepEqual(A.alignTranslation(items, { items: [{ i: 4, t: '世界' }] }), [{ i: 3, t: '' }, { i: 4, t: '世界' }]);
+  assert.equal(A.alignTranslation(items, { items: [] }), null);
+  assert.equal(A.supportsServerFallback('claude-opus-5-5'), true);
+  assert.equal(A.supportsServerFallback('claude-haiku-5-5'), false);
 });
 
 // ---------- 真实样本（可选）----------

@@ -95,6 +95,11 @@ function claudeResponse(res, body) {
 
 export function startMock(port = PORT) {
   const srv = http.createServer(async (req, res) => {
+    // CORS：允许浏览器直连（测试在线版"自带密钥"路径）
+    res.setHeader('access-control-allow-origin', '*');
+    res.setHeader('access-control-allow-headers', '*');
+    res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     let body = {};

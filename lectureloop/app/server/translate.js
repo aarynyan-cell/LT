@@ -1,12 +1,12 @@
 // 翻译 Provider 链：Google Cloud Translation（Basic v2）→ Claude → 报错（前端再降级到浏览器内置 Translator）。
 // 选型依据见 docs/01-PRD.md §9.3。
 import { AiError, askJson, claudeEnabled, FAST_MODEL } from './claude.js';
+import { translateTask, alignTranslation } from '../public/js/lib/ai-tasks.js';
 
 const GOOGLE_URL = () => process.env.GOOGLE_TRANSLATE_ENDPOINT || 'https://translation.googleapis.com/language/translate/v2';
 export const googleEnabled = () => !!process.env.GOOGLE_TRANSLATE_API_KEY;
 
 const GOOGLE_CODE = { zh: 'zh-CN', en: 'en', fr: 'fr' };
-const LANG_NAME = { zh: 'Simplified Chinese', en: 'English', fr: 'French' };
 
 export function availableProviders() {
   return { google: googleEnabled(), claude: claudeEnabled() };
@@ -70,21 +70,9 @@ async function viaGoogle(items, source, target) {
 }
 
 // ---------- Claude ----------
-const TRANSLATE_SCHEMA = {
-  type: 'object',
-  properties: { items: { type: 'array', items: { type: 'object', properties: { i: { type: 'integer' }, t: { type: 'string' } }, required: ['i', 't'], additionalProperties: false } } },
-  required: ['items'],
-  additionalProperties: false,
-};
-
 async function viaClaude({ items, source, context = [], glossary = [] }, target) {
-  const system = `You translate live lecture subtitles from ${LANG_NAME[source] || source} to ${LANG_NAME[target] || target}.
-Each input line is "index|text". The text comes from speech recognition: it has filler words (uh, um, okay) and sometimes wrong technical words - use the context to translate the intended meaning, but never add information.
-Rules: natural, concise subtitle style; drop pure fillers; keep technical terms accurate and consistent${glossary.length ? ` (glossary: ${glossary.slice(0, 80).join('; ')})` : ''}; return exactly one item per input line with the same index; do not merge or split lines.`;
-  const ctx = context.length ? `Previous lines (context only, do NOT translate):\n${context.slice(-3).join('\n')}\n\n` : '';
-  const user = `${ctx}Translate these lines:\n${items.map((c) => `${c.i}|${c.t.replace(/\s+/g, ' ').trim()}`).join('\n')}`;
-  const { data } = await askJson({ model: FAST_MODEL(), system, user, schema: TRANSLATE_SCHEMA, effort: 'low', maxTokens: 8000 });
-  const byI = new Map((data.items || []).map((x) => [x.i, String(x.t || '')]));
-  if (byI.size === 0) throw new AiError('bad_json', '翻译结果为空', 502);
-  return items.map((c) => ({ i: c.i, t: byI.get(c.i) ?? '' })); // 缺失的行留空，前端只显示原文
+  const { data } = await askJson({ model: FAST_MODEL(), ...translateTask({ items, source, target, context, glossary }) });
+  const out = alignTranslation(items, data);
+  if (!out) throw new AiError('bad_json', '翻译结果为空', 502);
+  return out;
 }

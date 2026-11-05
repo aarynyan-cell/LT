@@ -2,6 +2,7 @@ import { html } from '../h.js';
 import { useStore, dueClips, navigate, lessonUrl, actions, getCourse } from '../store.js';
 import { fmtDate } from '../lib/util.js';
 import { REASONS } from '../components/ui.js';
+import { aiAvailable } from '../lib/api.js';
 
 export function Home() {
   const lessons = useStore((s) => s.lessons);
@@ -52,6 +53,6 @@ export function Home() {
       <div><h2>卡点原因</h2><div class="card flat">${reasons.length || unlabeled ? html`${reasons.map(([label, n]) => html`<div class="reason-row"><span>${label}</span><div class="bar"><i style=${`width:${(n / maxR) * 100}%`}></i></div><span class="muted">${n}</span></div>`)}
         ${unlabeled ? html`<div class="reason-row"><span class="muted">未填原因</span><div class="bar"><i style=${`width:${(unlabeled / maxR) * 100}%;background:var(--muted)`}></i></div><span class="muted">${unlabeled}</span></div>` : ''}` : html`<div class="muted small">标记卡点后在这里看到分布。</div>`}</div></div>
     </div>
-    ${config && !config.claude && html`<p class="tiny muted" style="margin-top:20px">未检测到 Claude 密钥：笔记/词汇将使用离线版。在 <code>app/.env</code> 配置 <code>ANTHROPIC_API_KEY</code> 后重启即可（见设置页）。</p>`}
+    ${config && !aiAvailable() && html`<p class="tiny muted" style="margin-top:20px">未连接 Claude：笔记 / 词汇会使用离线版。${config.server ? html`在 <code>app/.env</code> 配置 <code>ANTHROPIC_API_KEY</code> 后重启，或` : '可以'}在 <a href="#/settings">设置</a> 里填入你自己的 Claude 密钥。</p>`}
   </div>`;
 }

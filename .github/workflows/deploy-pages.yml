@@ -1,0 +1,42 @@
+# 把 LectureLoop 前端（lectureloop/app/public）部署到 GitHub Pages：在线版无后端，数据存于访问者自己的浏览器。
+# 首次使用前：仓库 Settings → Pages → Build and deployment → Source 选择 “GitHub Actions”。
+name: Deploy LectureLoop to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lectureloop/app/public/**'
+      - 'lectureloop/app/tests/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        working-directory: lectureloop/app
+        run: node --test "tests/*.test.mjs"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: lectureloop/app/public
+      - id: deployment
+        uses: actions/deploy-pages@v4
