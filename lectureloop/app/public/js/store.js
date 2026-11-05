@@ -12,7 +12,7 @@ import { getConfig, aiNotes, aiLanguage, setApiConfig, aiAvailable } from './lib
 export const DEFAULTS = {
   srcLang: 'en', targets: ['zh'], fontSize: 30, fadeOriginal: false, hideFillers: false, showTr: true,
   noteLang: 'zh', recordingAck: false, seeded: false, trLang: 'zh', blind: false,
-  ttsMode: 'auto', ttsVoices: {},
+  ttsMode: 'auto', ttsVoices: {}, keepAwake: true, float: null,
 };
 
 // ---------- 状态 ----------

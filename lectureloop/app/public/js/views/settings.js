@@ -155,6 +155,7 @@ export function Settings() {
         <div class="field"><label>默认显示的译文（最多 2 种）</label><div class="row">${Object.entries(LANGS).map(([k, v]) => html`<span class=${'chip ' + (settings.targets.includes(k) ? 'on' : '')} onClick=${() => toggleTarget(k)}>${v}</span>`)}</div></div>
         <div class="field"><label>笔记 / 释义语言</label><select value=${settings.noteLang} onChange=${(e) => actions.setSetting('noteLang', e.target.value)}>${Object.entries(LANGS).map(([k, v]) => html`<option value=${k}>${v}</option>`)}</select></div>
         <label class="row small"><input type="checkbox" checked=${settings.fadeOriginal} onChange=${(e) => actions.setSetting('fadeOriginal', e.target.checked)} /> 上课时默认淡出原文（先听后看）</label>
+        <label class="row small" style="margin-top:6px" title="录音期间申请屏幕常亮，避免电脑休眠导致录音中断（只在页面可见时有效）"><input type="checkbox" checked=${settings.keepAwake !== false} onChange=${(e) => actions.setSetting('keepAwake', e.target.checked)} /> 录音时保持屏幕常亮</label>
         <label class="row small" style="margin-top:6px"><input type="checkbox" checked=${settings.hideFillers} onChange=${(e) => actions.setSetting('hideFillers', e.target.checked)} /> 阅读时隐藏语气词（uh / um）</label>
       </div>
 

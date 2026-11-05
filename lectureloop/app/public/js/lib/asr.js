@@ -61,8 +61,18 @@ export class LiveSession {
       if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(e.error)) { this.fatal = true; this.onError?.(e.error); }
       else this.onStatus?.('network');
     };
-    // 浏览器会在静音/网络波动时自动结束识别：会话进行中则重启
-    r.onend = () => { if (this.active && !this.fatal && !this.paused) { this.onStatus?.('reconnecting'); setTimeout(() => this.active && !this.paused && this._startRecognition(), 300); } };
+    // 浏览器会在静音/网络波动时自动结束识别：会话进行中则立即重启。
+    // 不用定时器：页面在后台时 setTimeout 会被降频（最长每分钟一次），字幕会长时间断档。
+    // 只有短时间内反复失败（例如网络断开）才退回到定时重试。
+    r.onend = () => {
+      if (!this.active || this.fatal || this.paused) return;
+      const now = performance.now();
+      this.restarts = (this.restarts || []).filter((t) => now - t < 5000);
+      this.restarts.push(now);
+      this.onStatus?.('reconnecting');
+      if (this.restarts.length <= 4) { try { this._startRecognition(); return; } catch { /* 落到定时重试 */ } }
+      setTimeout(() => this.active && !this.paused && this._startRecognition(), 1000);
+    };
     try { r.start(); } catch { /* 已在运行 */ }
     this.recog = r;
   }
