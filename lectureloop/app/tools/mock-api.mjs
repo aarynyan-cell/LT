@@ -19,8 +19,8 @@ function parseLines(text, marker) {
 }
 
 function answer(body) {
-  const sys = String(body.system || '');
-  const user = String(body.messages?.at(-1)?.content || '');
+  const sys = String(body.system || body.messages?.find((m) => m.role === 'system')?.content || '');
+  const user = String(body.messages?.filter((m) => m.role === 'user').at(-1)?.content || '');
   if (user.includes('TRIGGER_REFUSAL')) return { refusal: true };
 
   if (sys.includes('study notes')) {
@@ -96,16 +96,39 @@ function claudeResponse(res, body) {
 export function startMock(port = PORT) {
   const srv = http.createServer(async (req, res) => {
     // CORS：允许浏览器直连（测试在线版"自带密钥"路径）
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', '*');
-    res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
-    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+    // /nocors 开头的路径不加 CORS 头：模拟"不允许浏览器跨域"的服务商，用来测试中继
+    const noCors = req.url.startsWith('/nocors');
+    if (!noCors) {
+      res.setHeader('access-control-allow-origin', '*');
+      res.setHeader('access-control-allow-headers', '*');
+      res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(noCors ? 403 : 204); return res.end(); }
     const chunks = [];
     for await (const c of req) chunks.push(c);
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch {}
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/__last') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(last)); }
+    // OpenAI 兼容模拟：/p/<mode>/models 与 /p/<mode>/chat/completions（可加 /nocors 前缀）
+    // mode: ok 正常 | bad 返回 401（测试逐个候选验证）| length 被截断 | refuse 拒答 | fenced 带 ```json 围栏 | badschema 拒绝 json_schema 后降级
+    const om = url.pathname.match(/^(?:\/nocors)?\/p\/(ok|bad|length|refuse|fenced|badschema)(\/.*)$/);
+    if (om) {
+      const [, mode, rest] = om;
+      const tokenKeys = ['max_tokens', 'max_completion_tokens'].filter((k) => k in body);
+      (last.openai ||= []).push({ mode, rest, auth: req.headers.authorization || null, format: body.response_format?.type ?? null, tokenKeys, sysHasSchema: /JSON Schema/.test(String(body.messages?.[0]?.content || '')), model: body.model ?? null });
+      res.setHeader('content-type', 'application/json');
+      if (mode === 'bad') { res.writeHead(401); return res.end(JSON.stringify({ error: { message: 'invalid key' } })); }
+      if (rest === '/models') return res.end(JSON.stringify({ data: [{ id: 'mock-large' }, { id: 'mock-small' }, { id: 'text-embedding-x' }, { id: 'deepseek-chat' }] }));
+      if (rest === '/chat/completions') {
+        if (mode === 'badschema' && body.response_format?.type === 'json_schema') { res.writeHead(400); return res.end(JSON.stringify({ error: { message: 'response_format json_schema is not supported' } })); }
+        if (mode === 'refuse') return res.end(JSON.stringify({ choices: [{ message: { content: null, refusal: 'no' }, finish_reason: 'stop' }] }));
+        if (mode === 'length') return res.end(JSON.stringify({ choices: [{ message: { content: '{"x":' }, finish_reason: 'length' }] }));
+        const txt = JSON.stringify(answer(body));
+        return res.end(JSON.stringify({ model: 'mock-large', choices: [{ message: { content: mode === 'fenced' ? '```json\n' + txt + '\n```' : txt }, finish_reason: 'stop' }] }));
+      }
+      res.writeHead(404); return res.end('{}');
+    }
     if (url.pathname.startsWith('/v1/messages')) {
       last.claude = { path: req.url, beta: req.headers['anthropic-beta'] || null, model: body.model, fallbacks: body.fallbacks ?? null, output_config: body.output_config, stream: body.stream, temperature: body.temperature ?? null };
       return claudeResponse(res, body);

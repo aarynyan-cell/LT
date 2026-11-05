@@ -18,9 +18,15 @@ export class LiveSession {
     this.active = false; this.paused = false; this.fatal = false;
     this.t0 = 0; this.pausedTotal = 0; this.pausedAt = null; this.utterStart = null;
     // 话语跟踪：不丢被引擎替换掉的临时字幕，并校正每句的起止时间（见 utterance.js）
-    this.tracker = new UtteranceTracker({ onInterim: (t) => this.onInterim?.(t), onFinal: (c) => this.onFinal?.(c) });
+    this.log = []; // 排查用：识别引擎每次返回了什么、何时中断重启、保存了哪些句子（设置页可导出）
+    this.tracker = new UtteranceTracker({
+      onInterim: (t) => this.onInterim?.(t),
+      onFinal: (c) => { this._log('cue', { s: +c.start.toFixed(2), e: +c.end.toFixed(2), text: c.text.slice(0, 80), ...(c.provisional ? { prov: 1 } : {}), ...(c.replace ? { replace: 1 } : {}) }); this.onFinal?.(c); },
+    });
     this.chunks = []; this.demoIdx = 0; this.timer = 0; this.mime = '';
   }
+
+  _log(k, d = {}) { if (this.log.length > 6000) this.log.shift(); this.log.push({ t: +this.elapsed().toFixed(2), k, ...d }); }
 
   /** 已录制秒数（不含暂停） */
   elapsed() {
@@ -31,6 +37,7 @@ export class LiveSession {
 
   async start() {
     this.active = true; this.t0 = performance.now();
+    this._log('start', { src: this.source, lang: this.lang });
     if (this.source === 'demo') { this._demoNext(); this.onStatus?.('listening'); return; }
     // 麦克风录音
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -53,9 +60,11 @@ export class LiveSession {
     r.onresult = (e) => {
       const items = [];
       for (let k = e.resultIndex; k < e.results.length; k++) items.push({ text: e.results[k][0].transcript, final: e.results[k].isFinal });
+      this._log('result', { i: e.resultIndex, n: e.results.length, r: items.map((x) => ({ f: x.final ? 1 : 0, x: x.text.slice(0, 120) })) });
       this.tracker.feed(items, this.elapsed());
     };
     r.onerror = (e) => {
+      this._log('error', { e: e.error });
       if (e.error === 'no-speech' || e.error === 'aborted') return;
       if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(e.error)) { this.fatal = true; this.onError?.(e.error); }
       else this.onStatus?.('network');
@@ -64,6 +73,7 @@ export class LiveSession {
     // 不用定时器：页面在后台时 setTimeout 会被降频（最长每分钟一次），字幕会长时间断档。
     // 只有短时间内反复失败（例如网络断开）才退回到定时重试。
     r.onend = () => {
+      this._log('end');
       this.tracker.flush(); // 识别被结束时，还没定稿的假设不能丢
       if (!this.active || this.fatal || this.paused) return;
       const now = performance.now();
@@ -108,6 +118,7 @@ export class LiveSession {
 
   pause() {
     if (this.paused) return;
+    this._log('pause');
     this.paused = true; this.pausedAt = performance.now();
     clearTimeout(this.timer);
     try { this.rec?.pause(); } catch { /* ignore */ }
@@ -117,6 +128,7 @@ export class LiveSession {
   }
   resume() {
     if (!this.paused) return;
+    this._log('resume');
     this.pausedTotal += performance.now() - this.pausedAt; this.pausedAt = null; this.paused = false;
     try { this.rec?.resume(); } catch { /* ignore */ }
     if (this.source === 'demo') this._demoNext(); else if (asrSupported()) this._startRecognition();
@@ -125,6 +137,7 @@ export class LiveSession {
 
   /** 结束并返回 { blob, mime, duration } */
   async stop() {
+    this._log('stop');
     this.active = false;
     clearTimeout(this.timer);
     try { this.recog?.stop(); } catch { /* ignore */ }

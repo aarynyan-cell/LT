@@ -7,6 +7,7 @@ import { byok } from '../lib/byok.js';
 import { PROVIDERS, detectProvider, maskKey } from '../lib/providers.js';
 import { aiSource } from '../lib/api.js';
 import { listForLang, pickVoice, TIER_LABEL, SAMPLE } from '../lib/voices.js';
+import { getLiveLog } from '../lib/live.js';
 
 const TIER_ICON = { great: '★★', good: '★', ok: '', poor: '⚠', bad: '✕' };
 
@@ -210,6 +211,7 @@ export function Settings() {
         <div class="row wrap"><button class="btn" onClick=${exportData}>导出备份</button><button class="btn" onClick=${() => fileRef.current.click()}>导入备份</button>
           <input ref=${fileRef} class="hide" type="file" accept="application/json" onChange=${(e) => e.target.files[0] && importData(e.target.files[0])} /></div>
         <div class="row wrap" style="margin-top:10px"><button class="btn" onClick=${() => actions.loadSeed().then(() => toast('已加载示例课程'))}>加载示例课程</button>
+          <button class="btn" title="字幕丢句或时间对不上时，导出这个文件发给开发者排查（只含识别文字与时间，不含录音）" onClick=${() => { const log = getLiveLog(); if (!log.length) return toast('还没有上课记录：先录一次课再导出', { kind: 'warn' }); download(`lectureloop-asr-log-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.json`, JSON.stringify({ exportedAt: new Date().toISOString(), userAgent: navigator.userAgent, events: log }, null, 1), 'application/json'); }}>导出识别日志</button>
           <button class="btn danger" onClick=${() => confirm('清空全部数据（课程、转录、录音、卡点）？此操作不可撤销。') && actions.resetAll().then(() => toast('已清空'))}>清空全部数据</button></div>
       </div>
 

@@ -6,6 +6,7 @@ await startMock(port);
 process.env.ANTHROPIC_API_KEY ||= 'mock-key';
 process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
 process.env.GOOGLE_TRANSLATE_API_KEY ||= 'mock-key';
+process.env.RELAY_EXTRA_HOSTS ||= '127.0.0.1'; // 允许本地中继访问模拟接口（仅测试）
 process.env.GOOGLE_TRANSLATE_ENDPOINT = `http://127.0.0.1:${port}/language/translate/v2`;
 console.log(`[dev-mock] 使用模拟 Claude/Google（端口 ${port}），输出为占位内容`);
 await import('../server.js');

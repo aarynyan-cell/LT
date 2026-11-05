@@ -31,6 +31,8 @@ let draftTimer = 0;
 let titleTimer = 0;
 let wakeLock = null;
 let glossary = [];
+let lastLog = []; // 最近一次会话的识别日志（会话结束后仍可导出）
+export const getLiveLog = () => ses?.log || lastLog;
 
 export const getLive = () => state;
 export const liveElapsed = () => ses?.elapsed() || 0;
@@ -161,6 +163,7 @@ export const live = {
     ses = null;
     detach();
     const { blob, mime, duration } = await s.stop();
+    lastLog = s.log;
     const { lines, courseId, title, lang, source } = state;
     const m = marks;
     marks = [];
@@ -179,6 +182,7 @@ export const live = {
     detach();
     const s = ses; ses = null;
     await s.stop();
+    lastLog = s.log;
     set({ ...INITIAL });
   },
   setTitle(title) { set({ title }); },
