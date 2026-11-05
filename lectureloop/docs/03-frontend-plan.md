@@ -400,7 +400,7 @@ Manifest V3 (WXT)
 
 | 关注点 | 做法 |
 |---|---|
-| 部署 | Cloudflare Pages Git 集成（支持私有仓库、免费）：输出目录 `lectureloop/app/public`，无构建命令；`.github/workflows/test.yml` 只负责推送时跑单元测试 |
+| 部署 | Cloudflare Workers & Pages 的 Git 集成（支持私有仓库、免费）：根目录 `wrangler.jsonc` 声明纯静态资源目录 `lectureloop/app/public`，部署命令 `npx wrangler deploy`，无构建步骤（旧式 Pages 项目则填输出目录）；`.github/workflows/test.yml` 只负责推送时跑单元测试 |
 | 安全头 | `public/_headers`：CSP（`connect-src 'self' https://api.anthropic.com`）、`Permissions-Policy: microphone=(self)` 等，与本地服务一致 |
 | 子路径 | 所有静态资源与 API 均用**相对路径**（`css/app.css`、`js/main.js`、`api/config`），根路径或 `/LT/` 这类子路径都能部署 |
 | 模式判断 | 启动时请求 `api/config`：返回带 `version` 的配置 = 本地版；404 或被托管平台回退成 `index.html`（Cloudflare 的 SPA 行为，状态 200）= 在线静态版（`config.server=false`） |

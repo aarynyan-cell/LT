@@ -19,22 +19,24 @@
 
 | 用法 | 适合 | 怎么开始 |
 |---|---|---|
-| **在线版** | 直接打开、手机也能用 | 部署到 Cloudflare Pages（免费，源码仓库可保持私有，见下文）后打开 `https://<项目名>.pages.dev` |
+| **在线版** | 直接打开、手机也能用 | 部署到 Cloudflare（免费，源码仓库可保持私有，见下文）后打开 `https://lt.<你的子域>.workers.dev` |
 | **本地一键运行** | 日常使用，可在服务端配置密钥 | 双击 `start-mac.command`（Windows：`start-windows.bat`） |
 | **开发** | 改代码、调试 | `npm install && npm start` |
 
 两种版本功能相同。**数据都只保存在你自己的浏览器里**（按网址区分：在线版和本地版的课程互不相通，可用“设置 → 导出/导入备份”搬运）。
 
-### 在线版（Cloudflare Pages，免费，仓库可保持私有）
+### 在线版（Cloudflare Workers & Pages，免费，仓库可保持私有）
 
 在线版是纯静态网页，没有后端：实时字幕、导入、精听、卡点训练、离线笔记都能直接用；要用 Claude 生成笔记、词汇和实时翻译，在 **设置 → 在浏览器中使用 Claude** 里填入你**自己的** Claude API 密钥即可（只保存在当前浏览器，由浏览器直接发送到 api.anthropic.com，不进备份文件）。
 
 首次部署（只需一次，约 5 分钟）：
 
-1. 注册 / 登录 [Cloudflare](https://dash.cloudflare.com/)，进入 **Workers & Pages → Create → Pages → Connect to Git**。
-2. 授权 GitHub 时选择 **Only select repositories**，只勾选这个仓库（私有仓库也可以）。
-3. 构建设置：**Framework preset** 选 `None`，**Build command** 留空，**Build output directory** 填 `lectureloop/app/public`，生产分支为 `main`。
-4. 点 **Save and Deploy**，完成后得到 `https://<项目名>.pages.dev`。之后每次推送到 `main` 都会自动更新。
+1. 注册 / 登录 [Cloudflare](https://dash.cloudflare.com/)，进入 **Workers & Pages → Create application**，选择从 GitHub 导入仓库（授权时选 **Only select repositories**，只勾选这个仓库；私有仓库也可以）。
+2. 项目名填 **`lt`**（需与仓库根目录 `wrangler.jsonc` 里的 `name` 一致；想用别的名字就同时改这个文件）。
+3. 构建设置保持默认即可：Build command 留空，**Deploy command** 为 `npx wrangler deploy`，Root directory 为 `/`。仓库里的 `wrangler.jsonc` 已指定只发布 `lectureloop/app/public`。
+4. 部署完成后得到 `https://lt.<你的子域>.workers.dev`。之后每次推送到 `main` 都会自动更新。
+
+（如果你创建的是旧式 **Pages** 项目：Framework preset 选 `None`，Build command 留空，Build output directory 填 `lectureloop/app/public`，效果相同。）
 
 说明：网页的前端代码（`public/` 里的 JS/CSS）任何访问者都能在浏览器里看到，这是所有网站的共性；私有仓库保护的是文档、服务端代码、测试和提交历史。安全响应头（CSP、只允许本站使用麦克风）由 `public/_headers` 提供。仓库推送时 GitHub Actions 只跑单元测试，不负责部署。
 
@@ -116,7 +118,8 @@ npm run dev:mock
 ## 目录结构
 
 ```
-.github/workflows/test.yml           推送 / PR 时跑单元测试（在线版由 Cloudflare Pages 直接从仓库部署）
+wrangler.jsonc                       Cloudflare 部署配置：只发布 lectureloop/app/public（静态资源）
+.github/workflows/test.yml           推送 / PR 时跑单元测试（在线版由 Cloudflare 直接从仓库部署）
 lectureloop/
 ├─ start-mac.command / start-windows.bat / start.sh   一键启动
 ├─ docs/                 PRD / 产品设计 / 前端方案 / 截图

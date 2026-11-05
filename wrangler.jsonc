@@ -1,0 +1,10 @@
+// Cloudflare Workers（静态资源）部署配置：Workers & Pages 的 Git 集成会执行 `npx wrangler deploy` 读取本文件。
+// 只发布 LectureLoop 前端（纯静态，无服务端代码）；安全响应头见 lectureloop/app/public/_headers。
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "lt",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./lectureloop/app/public"
+  }
+}
