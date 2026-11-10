@@ -6,6 +6,7 @@ import { buildSeed, DEFAULT_TAGS } from './lib/seed.js';
 import { newSrs, review, queue } from './lib/srs.js';
 import { segmentParts, applyAnchors, cueAt, estimateTimeline } from './lib/text.js';
 import { titleParts, offlineNotes, offlineVocab, detectPatterns } from './lib/heuristics.js';
+import { renamePart, mergeWithPrev, splitAt } from './lib/parts.js';
 import { rulesFor, scanCorrections, applyCorrection, revertCorrection, DOMAIN } from './lib/glossary.js';
 import { getConfig, aiNotes, aiLanguage, setApiConfig, aiAvailable } from './lib/api.js';
 
@@ -196,6 +197,14 @@ export const actions = {
   },
 
   async updateLesson(id, patch) { return putLesson({ ...getLesson(id), ...patch }); },
+  /** 把课时移动到另一门课程：转录、录音、笔记、卡点、词汇都跟着课时走（它们都按课时 id 关联） */
+  async moveLessons(ids, courseId) {
+    for (const id of ids) await putLesson({ ...getLesson(id), courseId });
+  },
+  // ----- 片段（Part）编辑：只改 lesson.parts，句子与时间不变 -----
+  async renamePart(lessonId, partId, title) { const l = getLesson(lessonId); const parts = renamePart(l.parts, partId, title); if (parts) await putLesson({ ...l, parts, partsEdited: true }); return !!parts; },
+  async mergePart(lessonId, partId) { const l = getLesson(lessonId); const parts = mergeWithPrev(l.parts, partId); if (parts) await putLesson({ ...l, parts, partsEdited: true }); return !!parts; },
+  async splitPart(lessonId, cueIdx) { const l = getLesson(lessonId); const parts = splitAt(l.parts, cueIdx); if (!parts) return null; await putLesson({ ...l, parts, partsEdited: true }); return parts.find((p) => p.startCue === cueIdx).id; }, // 返回新片段的 id
   async deleteLesson(id, { silent } = {}) {
     await db.del('lessons', id); await db.del('transcripts', id); await db.del('audio', id);
     tcache.delete(id);
@@ -302,7 +311,8 @@ export const actions = {
           const r = await aiNotes({ course: course?.name, title: lesson.title, noteLang: state.settings.noteLang, cues: cues.map((c) => ({ i: c.i, t: c.text })) });
           const n = r.notes;
           source = 'claude'; model = r.model;
-          if (n.parts?.length >= 2) parts = n.parts.map((p, k) => ({ id: `p${k + 1}`, title: p.title || `Part ${k + 1}`, startCue: p.startCue, endCue: (n.parts[k + 1]?.startCue ?? cues.length) - 1, summary: p.summary }));
+          // 用户手动调整过片段时，不再用 AI 的分段覆盖
+          if (n.parts?.length >= 2 && !lesson.partsEdited) parts = n.parts.map((p, k) => ({ id: `p${k + 1}`, title: p.title || `Part ${k + 1}`, startCue: p.startCue, endCue: (n.parts[k + 1]?.startCue ?? cues.length) - 1, summary: p.summary }));
           notes = { overview: n.overview, keyPoints: n.keyPoints, concepts: n.concepts, formulas: n.formulas, emphasized: n.emphasized, questions: n.questions };
         } catch (e) {
           fallbackReason = e.message;

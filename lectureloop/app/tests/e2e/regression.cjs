@@ -158,7 +158,8 @@ const DOCX = process.env.DOCX || '';  // 可选：你的转录 docx 路径
     await page.waitForTimeout(400);
   });
 
-  await step('import real docx', async () => {
+  if (!DOCX) console.log('- import real docx：未设置 DOCX 环境变量，跳过');
+  else await step('import real docx', async () => {
     await page.goto(BASE + '/#/library');
     await page.click('button:has-text("导入")');
     await page.setInputFiles('.modal input[type=file][accept*=".docx"]', DOCX);

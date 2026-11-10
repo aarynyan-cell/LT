@@ -25,7 +25,6 @@ const set = (p) => { state = { ...state, ...p }; subs.forEach((f) => f(state)); 
 let ses = null;
 let marks = [];
 let pending = [];
-let flushTimer = 0;
 let flashTimer = 0;
 let draftTimer = 0;
 let titleTimer = 0;
@@ -55,19 +54,32 @@ const stripIds = () => state.lines.map(({ id, ...c }) => c);
 const saveDraft = () => state.lines.length && actions.saveLiveDraft({ courseId: state.courseId, title: state.title, lang: state.lang, lines: stripIds(), marks, ts: Date.now() });
 
 // ---------- 翻译队列 ----------
-async function flush() {
+// 每句提交后立即翻译；同时只有一个请求在途（保证顺序），在途期间新来的句子合并成下一批。
+// 之前是"攒 700 毫秒或 4 条再发"，大段连续讲课时译文要晚很久。
+let inflight = false;
+async function pump() {
+  if (inflight) return;
   const idxs = pending.splice(0);
   if (!idxs.length || !state.targets.length) return;
-  const items = idxs.map((i) => ({ i, t: state.lines[i].text }));
-  const context = state.lines.slice(Math.max(0, idxs[0] - 3), idxs[0]).map((l) => l.text);
+  inflight = true;
   try {
+    const items = idxs.map((i) => ({ i, t: state.lines[i].text }));
+    const context = state.lines.slice(Math.max(0, idxs[0] - 3), idxs[0]).map((l) => l.text);
     const r = await translate({ source: state.lang, targets: state.targets, items, context, glossary });
     const next = [...state.lines];
     for (const [tl, arr] of Object.entries(r.results || {})) for (const { i, t } of arr) if (next[i] && t) next[i] = { ...next[i], tr: { ...next[i].tr, [tl]: t } };
     set({ lines: next, trErr: null });
   } catch (e) {
     set({ trErr: e.message || '翻译不可用' });
+  } finally {
+    inflight = false;
+    if (pending.length) pump();
   }
+}
+/** 等待在途与排队的翻译结束（结束归档前用，最多等 timeout 毫秒） */
+async function drain(timeout = 3000) {
+  const end = Date.now() + timeout;
+  while ((inflight || pending.length) && Date.now() < end) { if (!inflight) pump(); await new Promise((r) => setTimeout(r, 80)); }
 }
 
 function onFinal(c) {
@@ -85,9 +97,7 @@ function onFinal(c) {
   }
   if (!state.targets.filter((t) => !c.tr?.[t]).length) return; // 演示课堂自带参考译文
   pending.push(idx);
-  clearTimeout(flushTimer);
-  // 后台标签的定时器会被降频：页面不可见时立即发送
-  if (pending.length >= 4 || document.hidden) flush(); else flushTimer = setTimeout(flush, 700);
+  pump();
 }
 
 // ---------- 保持运行 ----------
@@ -157,8 +167,7 @@ export const live = {
   async stop() {
     if (!ses || state.phase === 'saving') return null;
     set({ phase: 'saving' });
-    clearTimeout(flushTimer);
-    await Promise.race([flush(), new Promise((r) => setTimeout(r, 3000))]); // 最后一批译文：尽力而为
+    await drain(); // 最后一批译文：尽力而为，不阻塞归档
     const s = ses;
     ses = null;
     detach();

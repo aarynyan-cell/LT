@@ -5,6 +5,7 @@ import { hideFillers, highlightParts, partOf } from '../lib/text.js';
 import { phraseRegex } from '../lib/glossary.js';
 import { actions } from '../store.js';
 import { Hl, LANG_SHORT } from './ui.js';
+import { PartRenameDialog } from './dialogs.js';
 
 function CueText({ cue, hide, query }) {
   const text = hide ? hideFillers(cue.text) : cue.text;
@@ -24,7 +25,7 @@ function CueText({ cue, hide, query }) {
   return out;
 }
 
-function CueRow({ cue, stuck, trLang, showTr, hide, query, editing, calibrated, on }) {
+function CueRow({ cue, stuck, trLang, showTr, hide, query, editing, canSplit, on }) {
   const tr = showTr && cue.tr?.[trLang];
   const [draft, setDraft] = useState(cue.text);
   return html`<div class=${'cue' + (stuck ? ' stuck' : '')} data-i=${cue.i}>
@@ -42,6 +43,7 @@ function CueRow({ cue, stuck, trLang, showTr, hide, query, editing, calibrated, 
       <button title=${stuck ? '取消卡点' : '标为卡点（M）'} aria-label="标为卡点" onClick=${() => on.mark(cue.i)}>🚩</button>
       <button title="设为锚点：把当前播放位置设为这句的起点" aria-label="设为锚点" onClick=${() => on.anchor(cue.i)}>⚓</button>
       <button title="编辑这句（保留 ASR 原文）" aria-label="编辑" onClick=${() => on.edit(cue.i)}>✎</button>
+      ${canSplit ? html`<button title="从这句开始新片段" aria-label="从这句开始新片段" onClick=${() => on.splitAt(cue.i)}>✂</button>` : ''}
     </div>
   </div>`;
 }
@@ -53,6 +55,7 @@ export function Transcript({ lesson, cues, player, stuckSet, settings, focusCue,
   const [query, setQuery] = useState('');
   const [follow, setFollow] = useState(true);
   const [editing, setEditing] = useState(-1);
+  const [renaming, setRenaming] = useState(null); // 正在重命名的片段
   const pending = useRef(false); // 因高亮需要而刚展开的 Part：渲染后再滚动
   const openRef = useRef(open); openRef.current = open;
   const followRef = useRef(follow); followRef.current = follow;
@@ -105,6 +108,11 @@ export function Transcript({ lesson, cues, player, stuckSet, settings, focusCue,
     edit: (i) => setEditing(i),
     cancelEdit: () => setEditing(-1),
     saveEdit: async (i, text) => { setEditing(-1); if (text.trim() && text !== cues[i].text) await on.editCue(i, text.trim()); },
+    // 拆分后把新片段一并展开，免得用户以为内容"消失"了
+    splitAt: async (i) => {
+      const pid = await on.splitAt(i);
+      if (pid) setOpen((o) => new Set([...o, pid]));
+    },
   };
 
   return html`<div class=${'pane' + (blind ? ' blind' : '')} ref=${box}>
@@ -117,19 +125,24 @@ export function Transcript({ lesson, cues, player, stuckSet, settings, focusCue,
       ${matches ? html`<span class="tiny muted">${matches.length} 处</span>` : ''}
       <button class="btn sm ghost right" onClick=${() => setOpen(open.size >= lesson.parts.length ? new Set() : new Set(lesson.parts.map((p) => p.id)))}>${open.size >= lesson.parts.length ? '全部折叠' : '全部展开'}</button>
     </div>
-    ${lesson.parts.map((p) => {
+    ${lesson.parts.map((p, k) => {
       const isOpen = open.has(p.id);
       const a = cues[p.startCue], b = cues[p.endCue];
       const nStuck = isOpen ? 0 : cues.slice(p.startCue, p.endCue + 1).filter((c) => stuckSet.has(c.i)).length;
       return html`<section key=${p.id}>
-        <div class="part-h" onClick=${() => toggle(p.id)} role="button" aria-expanded=${isOpen} tabindex="0" onKeyDown=${(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggle(p.id))}>
+        <div class="part-h" onClick=${() => toggle(p.id)} role="button" aria-expanded=${isOpen} tabindex="0" onKeyDown=${(e) => e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggle(p.id))}>
           <span class="caret">${isOpen ? '▾' : '▸'}</span><b>${p.title}</b>
           <span class="tiny muted mono">${a ? fmtTime(a.start) : ''}–${b ? fmtTime(b.end) : ''}</span>
           ${nStuck ? html`<span class="badge stuck">${nStuck} 卡点</span>` : ''}
+          <span class="part-acts right" onClick=${(e) => e.stopPropagation()}>
+            <button class="btn sm ghost" aria-label=${'重命名片段 ' + p.title} title="重命名这个片段" onClick=${() => setRenaming(p)}>✎</button>
+            ${k > 0 ? html`<button class="btn sm ghost" aria-label=${'把 ' + p.title + ' 并入上一段'} title="并入上一个片段（标题沿用上一段，摘要合并）" onClick=${() => on.mergePart(p.id)}>↑并入上段</button>` : ''}
+          </span>
         </div>
         ${isOpen && p.summary ? html`<div class="small muted" style="padding:6px 8px 4px 22px">${p.summary}</div>` : ''}
-        ${isOpen ? cues.slice(p.startCue, p.endCue + 1).map((c) => html`<${CueRow} key=${c.i} cue=${c} stuck=${stuckSet.has(c.i)} trLang=${tlang} showTr=${showTr} hide=${hide} query=${query} editing=${editing === c.i} on=${handlers} />`) : ''}
+        ${isOpen ? cues.slice(p.startCue, p.endCue + 1).map((c) => html`<${CueRow} key=${c.i} cue=${c} stuck=${stuckSet.has(c.i)} trLang=${tlang} showTr=${showTr} hide=${hide} query=${query} editing=${editing === c.i} canSplit=${c.i > p.startCue} on=${handlers} />`) : ''}
       </section>`;
     })}
+    ${renaming && html`<${PartRenameDialog} part=${renaming} onSave=${(t) => on.renamePart(renaming.id, t)} onClose=${() => setRenaming(null)} />`}
   </div>`;
 }

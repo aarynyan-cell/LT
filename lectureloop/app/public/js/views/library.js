@@ -3,6 +3,7 @@ import { useStore, actions, navigate, lessonUrl, getCourse, getLesson } from '..
 import { debounce, fmtTime } from '../lib/util.js';
 import { highlightParts } from '../lib/text.js';
 import { Modal, Empty, Hl, LANGS } from '../components/ui.js';
+import { CourseEditDialog } from '../components/dialogs.js';
 
 export function Library() {
   const courses = useStore((s) => s.courses);
@@ -11,6 +12,7 @@ export function Library() {
   const [q, setQ] = useState('');
   const [hits, setHits] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);
 
   useEffect(() => {
     if (q.trim().length < 2) { setHits(null); return; }
@@ -40,12 +42,13 @@ export function Library() {
         const ls = lessons.filter((l) => l.courseId === c.id);
         const n = clips.filter((x) => ls.some((l) => l.id === x.lessonId) && x.kind === 'stuck').length;
         return html`<a key=${c.id} class="card" href=${'#/course/' + c.id} style=${`color:inherit;border-top:4px solid ${c.color}`}>
-          <div class="row"><h3 class="grow">${c.name}</h3>${c.sample ? html`<span class="badge">示例</span>` : ''}</div>
+          <div class="row"><h3 class="grow">${c.name}</h3>${c.sample ? html`<span class="badge">示例</span>` : ''}<button class="btn sm ghost" aria-label=${'编辑课程 ' + c.name} title="改名 / 改学期 / 改颜色" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); setEditing(c); }}>✎</button></div>
           <div class="small muted" style="margin-top:6px">${ls.length} 课时 · ${LANGS[c.srcLang] || ''}</div>
           <div class="row" style="margin-top:8px"><span class="badge stuck">${n} 卡点</span>${ls.some((l) => l.hasAudio) ? html`<span class="badge ok">🔊 有录音</span>` : ''}</div>
         </a>`;
       })}</div></div>`) : html`<${Empty} icon="📚" title="还没有课程">点右上角“导入”或去“上课”开始第一堂课。<//>`}
     ${adding && html`<${NewCourse} onClose=${() => setAdding(false)} />`}
+    ${editing && html`<${CourseEditDialog} course=${editing} onClose=${() => setEditing(null)} />`}
   </div>`;
 }
 

@@ -18,6 +18,7 @@ const D = await import(L + 'diff.js');
 const A = await import(L + 'ai-tasks.js');
 const V = await import(L + 'voices.js');
 const U = await import(L + 'utterance.js');
+const PT = await import(L + 'parts.js');
 
 // ---------- text ----------
 test('splitSentences: 句末标点、缩写、小数', () => {
@@ -314,6 +315,7 @@ test('语音：长句为在线语音分段（≤140 字符、不丢字）', () =
 });
 
 // ---------- 实时识别：话语跟踪器（Chrome 把未定稿的临时字幕直接换成下一句时不能丢字、时间要可靠）----------
+const U_units = (x) => x.trim().split(/\s+/).length;
 const track = () => {
   const out = [], interims = [];
   const tr = new U.UtteranceTracker({ onInterim: (t) => interims.push(t), onFinal: (c) => out.push(c) });
@@ -358,13 +360,15 @@ test('话语跟踪：开头的噪音假设不会污染下一句的开始时间�
 
 test('话语跟踪：时长不合理（语速过低）时把陈旧的开始时间推迟', () => {
   const { tr, out } = track();
-  // 17 个词，却从 111 秒持续到 137 秒（0.65 词/秒）：中间有 ~19 秒没有文字
+  // 20 个词，从 111 秒持续到 137 秒（0.77 词/秒）：中间有 ~19 秒没有文字。假设跨度大、词数够，会被提前切成两段
+  const full = 'in that case we do your research you use the lps can you yeah some violations and you allow together';
   tr.feed(ev('in that case we do your research'), 111);
-  tr.feed(ev('in that case we do your research you use the lps can you yeah some violations and you allow together'), 137);
-  tr.feed(ev('in that case we do your research you use the lps can you yeah some violations and you allow together', true), 138);
-  const c = out[0];
-  assert.ok(c.end - c.start <= 20 / 1.2 + 0.01, `时长 ${c.end - c.start}`);   // 20 个词，语速不低于 1.2 词/秒
-  assert.ok(c.end >= 137 && c.end <= 138, `结束 ${c.end}`);
+  tr.feed(ev(full), 137);
+  tr.feed(ev(full, true), 138);
+  assert.equal(out.map((c) => c.text).join(' '), full);                       // 一个词不丢、不重复
+  for (const c of out) assert.ok(c.end - c.start <= U_units(c.text) / 1.2 + 0.01, `语速过低：${c.text} ${c.end - c.start}s`);
+  assert.ok(out.at(-1).end >= 137 && out.at(-1).end <= 138, `结束 ${out.at(-1).end}`);
+  for (let k = 1; k < out.length; k++) assert.ok(out[k].start >= out[k - 1].end - 1e-9);   // 时间不重叠
 });
 
 test('话语跟踪：flush（识别结束 / 暂停 / 停止）保存未定稿的假设；随后相似的定稿替换它而不是重复', () => {
@@ -386,12 +390,124 @@ test('话语跟踪：长定稿按句拆分，时间连续且覆盖整段', () =>
   assert.ok(out.every((c) => c.end > c.start));
 });
 
+// 一段 60 词的连续讲课（没有停顿、没有标点，Chrome 一直追加临时字幕、迟迟不定稿）
+const MONO = ('so today we are going to talk about the margin of a classifier and the idea is that we want to find the line that separates the two classes '
+  + 'as far as possible from the closest points okay so these closest points we call support vectors and they are the only points that matter for the boundary '
+  + 'because if you move any other point the line does not change at all').split(' ');
+function speak(tr, wordsArr, { wps = 2.5, step = 0.4, t0 = 0, onTick } = {}) {
+  // 每 step 秒收到一次临时更新：此刻已说出的所有词（模拟 Chrome 的增长式 interim）
+  const total = wordsArr.length / wps;
+  for (let t = step; t <= total + 1e-9; t += step) {
+    const n = Math.min(wordsArr.length, Math.floor(t * wps));
+    onTick?.(t0 + t);
+    tr.feed(ev(wordsArr.slice(0, n).join(' ')), t0 + t);
+  }
+  return t0 + total;
+}
+
+test('话语跟踪：持续说话不停顿时，边说边提交（延迟有上限），不丢词、不重复、时间不重叠', () => {
+  const out = [];
+  let now = 0;
+  const tr = new U.UtteranceTracker({ onInterim() {}, onFinal: (c) => out.push({ ...c, at: now }) });
+  const endT = speak(tr, MONO, { onTick: (t) => { now = t; } });
+  const before = out.length;                                    // 定稿之前已经提交的句子数
+  assert.ok(before >= 3, `说话过程中应已提交 ≥3 句，实际 ${before}`);
+  now = endT + 1; tr.feed(ev(MONO.join(' '), true), now);       // 老师停顿后，Chrome 才给定稿
+  assert.equal(out.map((c) => c.text).join(' '), MONO.join(' '));// 完整、无重复
+  for (const c of out) assert.ok(U_units(c.text) <= 22, `单句过长 ${U_units(c.text)} 词：${c.text}`);
+  for (let k = 1; k < out.length; k++) assert.ok(out[k].start >= out[k - 1].end - 1e-6, `时间重叠 #${k}`);
+  // 延迟：每句从"它说完"到"被提交"的时间 ≤ 3 秒（定稿之后的最后一句除外）
+  for (const c of out.slice(0, before)) assert.ok(c.at - c.end <= 3, `提交延迟 ${(c.at - c.end).toFixed(1)}s：${c.text}`);
+  // 第一句最迟在开始说话后 8 秒内出现
+  assert.ok(out[0].at <= 8, `第一句出现在 ${out[0].at}s`);
+});
+
+test('话语跟踪：优先在连接词（and/so/but/because/okay）之前切开', () => {
+  const { tr, out } = track();
+  speak(tr, MONO, {});
+  assert.ok(out.length >= 2);
+  const startsOk = out.slice(1).filter((c) => /^(and|so|but|because|okay|which|where|then|now|if|that)\b/i.test(c.text)).length;
+  assert.ok(startsOk >= 1, `没有在连接词处切开：${out.map((c) => c.text.split(' ').slice(0, 2).join(' ')).join(' | ')}`);
+});
+
+test('话语跟踪：提交之后引擎修订了前面的词，也不会重复或丢失后面的内容', () => {
+  const { tr, out } = track();
+  const w = MONO.slice(0, 30);
+  speak(tr, w, {});
+  const n = out.length;
+  assert.ok(n >= 1);
+  const revised = [...w]; revised[2] = 'WERE'; revised[3] = 'GOING';          // 开头被修订（已提交的部分）
+  const rest = out.map((c) => c.text).join(' ').split(' ').length;
+  tr.feed(ev(revised.join(' '), true), 20);
+  const all = out.map((c) => c.text).join(' ').split(' ');
+  assert.equal(all.length, 30);                                                // 总词数不变：靠词数偏移去重
+  assert.equal(all.slice(rest).join(' '), w.slice(rest).join(' '));            // 未提交部分取自定稿
+});
+
+test('话语跟踪：提交之后引擎换成另一句话，剩余部分被保存，已提交部分不重复', () => {
+  const { tr, out } = track();
+  speak(tr, MONO.slice(0, 24), {});
+  const committed = out.map((c) => c.text).join(' ').split(' ').length;
+  tr.feed(ev('it is better than what we said so here we are'), 30);            // 引擎丢弃上一个假设
+  const all = out.map((c) => c.text).join(' ');
+  assert.equal(all.split(' ').length, 24);                                     // 24 个词都保存了，一个不多
+  assert.ok(all.startsWith(MONO.slice(0, 5).join(' ')));
+  assert.ok(committed < 24 && out.at(-1).provisional === true);
+});
+
+test('话语跟踪：中文持续说话按标点/字数切开', () => {
+  const { tr, out } = track();
+  const zh = '好我们今天来讲间隔这个概念，简单来说就是找一条线把两类点分开，而且要离最近的点尽可能远，这些最近的点我们叫做支持向量，只有它们决定边界。';
+  for (let i = 4; i <= zh.length; i += 4) tr.feed(ev(zh.slice(0, i)), i * 0.2);
+  tr.feed(ev(zh, true), zh.length * 0.2 + 1);
+  assert.ok(out.length >= 3, `应切成 ≥3 段：${out.map((c) => c.text).join('|')}`);
+  assert.equal(out.map((c) => c.text).join(''), zh);
+  assert.ok(out.slice(0, -1).some((c) => /[，。]$/.test(c.text)));             // 至少有一处切在标点之后
+});
+
 test('话语跟踪：isRevision 区分"修订"与"另一句话"', () => {
   assert.equal(U.isRevision('in that case', 'in that case we do'), true);
   assert.equal(U.isRevision('in that case we do your research', 'in that case we do the research you use'), true);
   assert.equal(U.isRevision('in that case we do your research', 'it is better than what we said'), false);
   assert.equal(U.isRevision('in that case we do your research', 'so'), false);
-  assert.equal(U.isRevision('the', 'so now we look at the margin'), false);   // 单个词碰巧出现在新句里，不是修订
+  assert.equal(U.isRevision('the', 'so now we look at the margin'), false);
+  assert.equal(U.isRevision('好我们今天来讲间', '好我们今天来讲间隔这个概'), true);        // 中文：按字符前缀，不是整句当一个词
+  assert.equal(U.isRevision('好我们今天来讲间隔这个概念', '这个最近的点叫做支持向量'), false);   // 单个词碰巧出现在新句里，不是修订
+});
+
+// ---------- 片段（Part）编辑 ----------
+const P3 = () => [{ id: 'p1', title: 'A', startCue: 0, endCue: 9, summary: 'sa' }, { id: 'p2', title: 'B', startCue: 10, endCue: 19, summary: 'sb' }, { id: 'p3', title: 'C', startCue: 20, endCue: 29, summary: '' }];
+
+test('片段编辑：重命名；空标题 / 未知 id 被拒绝', () => {
+  assert.equal(PT.renamePart(P3(), 'p2', '  第二章  ')[1].title, '第二章');
+  assert.equal(PT.renamePart(P3(), 'p2', '   '), null);
+  assert.equal(PT.renamePart(P3(), 'zz', 'x'), null);
+});
+
+test('片段编辑：并入上一段后仍然连续、覆盖全部句子；第一段不能并入', () => {
+  const r = PT.mergeWithPrev(P3(), 'p2');
+  assert.equal(r.length, 2);
+  assert.deepEqual([r[0].startCue, r[0].endCue, r[0].title, r[0].summary], [0, 19, 'A', 'sa\nsb']);
+  assert.equal(PT.validateParts(r, 30), null);
+  assert.equal(PT.mergeWithPrev(P3(), 'p1'), null);
+  assert.equal(PT.validateParts(PT.mergeWithPrev(P3(), 'p3'), 30), null);
+});
+
+test('片段编辑：从某句拆分；第一句 / 越界不能拆；id 唯一；可反复拆再并回', () => {
+  let r = PT.splitAt(P3(), 14);
+  assert.equal(r.length, 4);
+  assert.deepEqual(r.map((p) => [p.startCue, p.endCue]), [[0, 9], [10, 13], [14, 19], [20, 29]]);
+  assert.equal(r[2].title, 'B (续)');
+  assert.equal(PT.validateParts(r, 30), null);
+  assert.equal(PT.splitAt(P3(), 10), null);                 // 已经是片段第一句
+  assert.equal(PT.splitAt(P3(), 0), null);
+  assert.equal(PT.splitAt(P3(), 99), null);
+  r = PT.splitAt(r, 16);                                    // 再拆
+  assert.equal(r.find((p) => p.startCue === 16).title, 'B (续)');   // 不会变成 "B (续) (续)"
+  assert.equal(PT.validateParts(r, 30), null);
+  const back = PT.mergeWithPrev(PT.mergeWithPrev(r, r.find((p) => p.startCue === 16).id), r.find((p) => p.startCue === 14).id);
+  assert.deepEqual(back.map((p) => [p.startCue, p.endCue]), [[0, 9], [10, 19], [20, 29]]);
+  assert.equal(new Set(r.map((p) => p.id)).size, r.length);
 });
 
 // ---------- 真实样本（可选）----------

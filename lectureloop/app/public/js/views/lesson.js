@@ -11,6 +11,7 @@ import { Modal, Tabs, Empty, TagChip, useHotkeys } from '../components/ui.js';
 import { NotesPanel } from './notes.js';
 import { LanguagePanel } from './language.js';
 import { ClipsPanel } from './clips.js';
+import { LessonEditDialog } from '../components/dialogs.js';
 
 const TL = { real: ['真实时间轴', 'ok'], estimated: ['⚠ 估算时间轴', 'warn'], calibrated: ['已校准', 'acc'] };
 
@@ -30,6 +31,7 @@ export function Lesson({ route }) {
   const [tab, setTab] = useState('notes');
   const [clipDlg, setClipDlg] = useState(null);
   const [calib, setCalib] = useState(false);
+  const [editing, setEditing] = useState(false);
   const focusCue = route.query.cue != null ? +route.query.cue : undefined;
   const audioInput = useRef();
   const keyRef = useRef();
@@ -98,6 +100,9 @@ export function Lesson({ route }) {
     mark: markCue,
     anchor: anchorCue,
     editCue: (i, text) => actions.editCue(id, i, text),
+    renamePart: (pid, title) => actions.renamePart(id, pid, title),
+    mergePart: async (pid) => { if (await actions.mergePart(id, pid)) toast('已并入上一个片段'); },
+    splitAt: async (i) => { const pid = await actions.splitPart(id, i); if (pid) toast('已从这句开始新片段'); return pid; },
   };
 
   keyRef.current = (e) => {
@@ -132,7 +137,8 @@ export function Lesson({ route }) {
     <div class="studio-head">
       <div class="crumbs"><a href="#/library">课程库</a><span>›</span><a href=${'#/course/' + lesson.courseId}>${course?.name}</a><span>›</span><span>${lesson.title}</span></div>
       <div class="row wrap" style="margin-top:4px">
-        <h1 style="font-size:19px" title="双击重命名" onDblClick=${() => { const t = prompt('课时标题', lesson.title); if (t) actions.updateLesson(id, { title: t }); }}>${lesson.title}</h1>
+        <h1 style="font-size:19px" title="点右边 ✎ 重命名 / 移动课时">${lesson.title}</h1>
+        <button class="btn sm ghost" aria-label="编辑课时" title="重命名、改日期、移动到其他课程" onClick=${() => setEditing(true)}>✎ 编辑</button>
         <span class="muted small">${lesson.date || ''} · ${fmtDuration(lesson.duration)} · ${cues.length} 句</span>
         <button class=${'badge ' + tlTone} style="border:0;cursor:pointer" onClick=${() => setCalib(true)} title="点击了解如何校准">${tlLabel}${lesson.anchors?.length ? ` · ${lesson.anchors.length} 锚点` : ''}</button>
         <span class=${'badge ' + (lesson.hasAudio ? 'ok' : '')}>${lesson.hasAudio ? '🔊 有录音' : '无录音'}</span>
@@ -159,6 +165,7 @@ export function Lesson({ route }) {
       <${Timeline} player=${player} cues=${cues} parts=${lesson.parts} duration=${Math.max(1, player.duration || lesson.duration)} clips=${clips} tags=${tags} anchors=${lesson.anchors} onSelect=${onSelect} showDensity=${lesson.timeline !== 'estimated'} />
     <//>
 
+    ${editing && html`<${LessonEditDialog} lesson=${lesson} onClose=${() => setEditing(false)} onMoved=${(cid) => navigate('/course/' + cid)} />`}
     ${clipDlg && html`<${ClipDialog} sel=${clipDlg} cues=${cues} tags=${tags} onClose=${() => setClipDlg(null)} lessonId=${id} />`}
     ${calib && html`<${Modal} title="时间轴与校准" onClose=${() => setCalib(false)} foot=${html`<button class="btn primary" onClick=${() => setCalib(false)}>好的</button>`}>
       <p>当前：<span class=${'badge ' + tlTone}>${tlLabel}</span></p>

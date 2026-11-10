@@ -115,6 +115,7 @@ h1 { font-size: 22px; } h2 { font-size: 17px; } h3 { font-size: 15px; }
 .pane { min-height: 0; overflow: auto; padding: 14px 18px 30px; } .pane + .pane { border-left: 1px solid var(--line); background: var(--surface2); }
 .tool { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-bottom: 10px; position: sticky; top: -14px; background: var(--bg); z-index: 2; margin: -14px -18px 6px; padding: 10px 18px; border-bottom: 1px solid var(--line); }
 .part-h { display: flex; align-items: center; gap: 8px; padding: 8px 4px; margin-top: 8px; cursor: pointer; position: sticky; top: 40px; background: var(--bg); z-index: 1; border-bottom: 1px solid var(--line); }
+.part-h .part-acts { display: flex; gap: 2px; opacity: .55; } .part-h:hover .part-acts, .part-h:focus-within .part-acts { opacity: 1; }
 .part-h b { font-size: 14px; } .part-h .caret { width: 14px; color: var(--muted); }
 .cue { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 8px; padding: 6px 8px; border-left: 3px solid transparent; border-radius: 0 8px 8px 0; position: relative; }
 .cue:hover { background: var(--surface); }
@@ -162,7 +163,8 @@ mark.hit { background: var(--hl); color: inherit; padding: 0 1px; border-radius:
 .live-ctl { padding: 10px 24px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .rec { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-weight: 600; } .rec i { width: 10px; height: 10px; border-radius: 50%; background: var(--stuck); animation: pulse 1.2s infinite; } .rec.off i { background: var(--muted); animation: none; }
 @keyframes pulse { 50% { opacity: .25; } }
-.stage { flex: 1; min-height: 0; overflow: auto; padding: 24px clamp(16px, 6vw, 90px); display: flex; flex-direction: column; gap: 14px; }
+.stage-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.stage { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 24px clamp(16px, 6vw, 90px); display: flex; flex-direction: column; gap: 14px; }
 .stage > :first-child { margin-top: auto; }
 .stage .ln { line-height: 1.4; } .stage .ln.old { opacity: .55; } .stage .ln.interim { opacity: .6; } .stage .o { font-weight: 600; } .stage .tr { color: var(--accent); margin-top: 2px; } .stage .tr2 { color: var(--ok); }
 .fade .o { filter: blur(8px); transition: filter .15s; } .fade .ln:hover .o, .fade.peek .o { filter: none; }
@@ -216,3 +218,11 @@ mark.hit { background: var(--hl); color: inherit; padding: 0 1px; border-radius:
 /* ---------- 全局录音条（离开上课页后仍可见）---------- */
 .recbar { position: sticky; top: 0; z-index: 60; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 16px; background: var(--stuck-soft); border-bottom: 1px solid var(--stuck); font-size: 14px; }
 .recbar .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 字幕记录：完整历史可上滑查看；每行时间戳；长会话用 content-visibility 减少渲染开销 */
+.stage .ln { content-visibility: auto; contain-intrinsic-size: auto 5em; position: relative; }
+.stage .ln .ts { position: absolute; left: -64px; top: .45em; font-size: 12px; color: var(--muted); opacity: .8; }
+.stage { padding-left: clamp(64px, 6vw, 110px); }
+.to-latest { position: absolute; right: 24px; bottom: 14px; z-index: 5; border: 0; border-radius: 999px; padding: 8px 16px; background: var(--accent); color: var(--accent-ink); font-weight: 600; box-shadow: var(--shadow); cursor: pointer; }
+.to-latest:hover { filter: brightness(1.08); }
+@media (max-width: 900px) { .stage .ln .ts { position: static; display: block; } .stage { padding-left: 16px; } }

@@ -27,6 +27,21 @@ export async function finishLive() {
   navigate(lessonUrl(lesson.id));
 }
 
+/** 已提交的字幕历史：只在 lines 变化时重绘（不随每次临时字幕更新重绘），保证长时间上课也流畅 */
+function Lines({ targets }) {
+  const lines = useLive((s) => s.lines);
+  const n = lines.length;
+  return html`${lines.map((l, k) => html`<div class=${'ln' + (k < n - 2 ? ' old' : '')} key=${l.id}>
+    <span class="ts mono">${fmtTime(l.start)}</span>
+    <div class="o">${l.text}</div>
+    ${targets.map((t, i) => (l.tr?.[t] ? html`<div class=${'tr' + (i ? ' tr2' : '')} style="font-size:.62em">${l.tr[t]}</div>` : ''))}
+  </div>`)}`;
+}
+function Interim() {
+  const interim = useLive((s) => s.interim);
+  return interim ? html`<div class="ln interim"><div class="o">${interim}</div></div>` : null;
+}
+
 export function Live({ route }) {
   const courses = useStore((s) => s.courses);
   const settings = useStore((s) => s.settings);
@@ -51,7 +66,25 @@ export function Live({ route }) {
   useEffect(() => { actions.getLiveDraft().then((d) => d?.lines?.length && setDraft(d)); }, []);
   // 回到上课页时，显示正在进行的会话的课程/标题
   useEffect(() => { if (running) { setCourseId(L.courseId); setTitle(L.title); } }, []);
-  useEffect(() => { const el = stage.current; if (el) el.scrollTop = el.scrollHeight; }, [L.lines, L.interim]);
+  // 自动跟随：只有用户本来就在底部时才跟随新字幕；上滑查看前文时不打扰，并提示有多少条新内容
+  const stick = useRef(true);
+  const [away, setAway] = useState(0);          // 离开底部后新增的字幕条数
+  const leftAt = useRef(0);
+  const onScroll = () => {
+    const el = stage.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (atBottom && !stick.current) setAway(0);
+    if (!atBottom && stick.current) leftAt.current = L.lines.length;
+    stick.current = atBottom;
+  };
+  useEffect(() => {
+    const el = stage.current;
+    if (!el) return;
+    if (stick.current) el.scrollTop = el.scrollHeight;
+    else setAway(Math.max(0, L.lines.length - leftAt.current));
+  }, [L.lines.length, L.interim]);
+  const toLatest = () => { const el = stage.current; if (el) { el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); stick.current = true; setAway(0); } };
   useEffect(() => { const up = (e) => (e.key === 'h' || e.key === 'H') && setPeek(false); window.addEventListener('keyup', up); return () => window.removeEventListener('keyup', up); }, []);
 
   // acked：刚在确认框里点了“我已获得许可”。不能依赖 settings.recordingAck——这个闭包里它还是旧值，会再次弹出确认框
@@ -90,7 +123,6 @@ export function Live({ route }) {
     actions.setSetting('targets', cur.includes(l) ? cur.filter((x) => x !== l) : [...cur, l].slice(-2));
   };
   const f = settings.float || {};
-  const shown = L.lines.slice(-8);
 
   return html`<div class="live">
     <div class="live-bar">
@@ -137,13 +169,13 @@ export function Live({ route }) {
         ${!canMic ? html`<div class="banner warn" style="border-radius:8px">此浏览器不支持实时语音识别或录音（建议使用桌面版 Chrome / Edge，并通过 localhost 或 https 访问）。可以先用“演示课堂”体验完整流程，或在课程库导入转录。</div>` : ''}
         <div class="tiny muted" style="margin-top:8px">提示：浏览器的语音识别可能由浏览器厂商的云服务处理；录音只保存在本机。${config && !translateAvailable() ? ' 当前没有可用的翻译服务，实时译文不可用（演示课堂自带参考译文；可在“设置”里填入 API 密钥）。' : ''}</div>
       </div></div>`
-    : html`<div class=${'stage' + (settings.fadeOriginal ? ' fade' : '') + (peek ? ' peek' : '')} ref=${stage} style=${`font-size:${settings.fontSize}px`} aria-live="polite">
-        ${shown.map((l, k) => html`<div class=${'ln' + (k < shown.length - 1 ? ' old' : '')} key=${l.id}>
-          <div class="o">${l.text}</div>
-          ${targets.map((t, n) => (l.tr?.[t] ? html`<div class=${'tr' + (n ? ' tr2' : '')} style="font-size:.62em">${l.tr[t]}</div>` : ''))}
-        </div>`)}
-        ${L.interim ? html`<div class="ln interim"><div class="o">${L.interim}</div></div>` : ''}
+    : html`<div class="stage-wrap">
+      <div class=${'stage' + (settings.fadeOriginal ? ' fade' : '') + (peek ? ' peek' : '')} ref=${stage} onScroll=${onScroll} style=${`font-size:${settings.fontSize}px`} aria-live="off" tabindex="0" aria-label="字幕记录（可上下滚动查看前文）">
+        <${Lines} targets=${targets} />
+        <${Interim} />
         ${!L.lines.length && !L.interim ? html`<div class="muted center" style="font-size:16px">${L.phase === 'paused' ? '已暂停' : '正在聆听…'}</div>` : ''}
+      </div>
+      ${away > 0 || !stick.current && L.lines.length > 3 ? html`<button class="to-latest" onClick=${toLatest}>↓ 回到最新${away > 0 ? `（${away} 条新字幕）` : ''}</button>` : ''}
       </div>
       <div class="stuck-dock">
         <button class="btn stuck" disabled=${L.phase !== 'running'} onMouseDown=${(e) => e.preventDefault()} onClick=${() => live.mark()}>🚩 没听懂 <span class="kbd" style="color:var(--ink)">Space</span></button>
