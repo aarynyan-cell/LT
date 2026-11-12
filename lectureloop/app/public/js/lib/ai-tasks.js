@@ -192,6 +192,20 @@ Rules: natural, concise subtitle style; drop pure fillers; keep technical terms 
   return { system, user, schema: TRANSLATE_SCHEMA, effort: 'low', maxTokens: 8000 };
 }
 
+/**
+ * 影视/网页视频字幕翻译（Chrome 插件用）。和课堂字幕不同：对白口语化、有语气/俚语/玩笑/称呼，来源是已有字幕而不是语音识别。
+ * source 可以是 'auto'（逐句自行判断是法语/英语/中文）。
+ */
+export function subtitleTask({ items, source, target, context = [], glossary = [] }) {
+  const from = source && source !== 'auto' ? TR_LANG[source] || source : 'the language of each line (French, English or Chinese; detect it per line)';
+  const system = `You translate subtitles of TV shows, films and online videos from ${from} to ${TR_LANG[target] || target}.
+Each input line is "index|text" and is one subtitle cue (it may hold two speakers, marked with "-").
+Rules: natural spoken ${TR_LANG[target] || target} that keeps the speaker's tone, register, slang, jokes and swearing; short enough to read in 2-3 seconds; keep names and song lyrics marks (♪) as they are; if a line is already in the target language return it unchanged; never explain, never add information; use the previous lines only as context${glossary.length ? `; glossary: ${glossary.slice(0, 80).join('; ')}` : ''}; return exactly one item per input line with the same index; do not merge or split lines.`;
+  const ctx = context.length ? `Previous lines (context only, do NOT translate):\n${context.slice(-3).join('\n')}\n\n` : '';
+  const user = `${ctx}Translate these lines:\n${items.map((c) => `${c.i}|${c.t.replace(/\s+/g, ' ').trim()}`).join('\n')}`;
+  return { system, user, schema: TRANSLATE_SCHEMA, effort: 'low', maxTokens: 4000 };
+}
+
 /** 按输入顺序对齐译文；缺失的行留空（前端只显示原文）。完全为空时返回 null。 */
 export function alignTranslation(items, data) {
   const byI = new Map((data?.items || []).map((x) => [x.i, String(x.t || '')]));

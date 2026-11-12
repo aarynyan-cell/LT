@@ -56,7 +56,7 @@ function answer(body) {
     };
   }
 
-  if (sys.includes('translate live lecture subtitles')) {
+  if (sys.includes('translate live lecture subtitles') || sys.includes('translate subtitles of TV shows')) {
     const tag = /to Simplified Chinese/.test(sys) ? 'zh' : /to French/.test(sys) ? 'fr' : 'en';
     const cues = parseLines(user, 'Translate these lines:\n');
     return { items: cues.map((c) => ({ i: c.i, t: `【${tag}】${c.t}` })) };
@@ -129,9 +129,34 @@ export function startMock(port = PORT) {
       }
       res.writeHead(404); return res.end('{}');
     }
+    // Anthropic 模型列表（插件的密钥验证用）
+    if (url.pathname === '/v1/models') {
+      (last.anthropicModels ||= []).push({ key: req.headers['x-api-key'] || null, direct: req.headers['anthropic-dangerous-direct-browser-access'] || null });
+      res.writeHead(req.headers['x-api-key'] === 'sk-ant-bad' ? 401 : 200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ data: [{ id: 'claude-opus-5-5' }, { id: 'claude-sonnet-5-5' }, { id: 'claude-haiku-5-5' }] }));
+    }
     if (url.pathname.startsWith('/v1/messages')) {
       last.claude = { path: req.url, beta: req.headers['anthropic-beta'] || null, model: body.model, fallbacks: body.fallbacks ?? null, output_config: body.output_config, stream: body.stream, temperature: body.temperature ?? null };
+      (last.claudeCalls ||= []).push({ model: body.model, effort: body.output_config?.effort ?? null, format: body.output_config?.format?.type ?? null, stream: !!body.stream, key: req.headers['x-api-key'] || null });
+      // 非流式请求（插件）：直接返回 JSON 消息；/v1/messages 之前加 /effort400 或 /format400 可模拟"不支持 effort / 结构化输出"
+      if (!body.stream) {
+        if (/^\/effort400/.test(req.url) || (url.pathname.includes('/e400') && body.output_config?.effort)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'output_config.effort is not supported for this model' } })); }
+        if (url.pathname.includes('/f400') && body.output_config?.format) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'output_config.format is not supported' } })); }
+        if (url.pathname.includes('/limit')) { res.writeHead(429, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } })); }
+        const out = answer(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ id: 'msg_mock', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: JSON.stringify(out) }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 100, output_tokens: 50 } }));
+      }
       return claudeResponse(res, body);
+    }
+    // 免费 Google 翻译（非官方 gtx 接口）模拟：/gtx 正常 | /gtx/fail 返回 500 | /gtx/limit 返回 429
+    if (url.pathname === '/gtx' || url.pathname.startsWith('/gtx/')) {
+      const q = url.searchParams.get('q') || '';
+      (last.gtx ||= []).push({ sl: url.searchParams.get('sl'), tl: url.searchParams.get('tl'), q });
+      if (url.pathname === '/gtx/fail') { res.writeHead(500); return res.end('x'); }
+      if (url.pathname === '/gtx/limit') { res.writeHead(429); return res.end('x'); }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify([[[`[g:${url.searchParams.get('tl')}] ${q}`, q, null, null, 10]], null, /[àâçéèêëîïôûùœ]|\b(le|la|les|je|vous|est)\b/i.test(q) ? 'fr' : 'en']));
     }
     if (url.pathname.endsWith('/language/translate/v2')) {
       last.google = { target: body.target, n: body.q?.length };

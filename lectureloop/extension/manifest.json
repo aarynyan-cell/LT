@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "LectureLoop 字幕翻译",
+  "short_name": "字幕翻译",
+  "version": "0.1.0",
+  "description": "看网页视频时实时翻译字幕：法语 / 英语 / 中文互译。支持 YouTube、Netflix 等站点的字幕、视频字幕轨道，以及手动选取字幕位置。",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "字幕翻译（Alt+T 开关）",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "dist/content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.anthropic.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.deepseek.com/*",
+    "https://api.moonshot.cn/*",
+    "https://open.bigmodel.cn/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://api.siliconflow.cn/*",
+    "https://ark.cn-beijing.volces.com/*",
+    "https://openrouter.ai/*",
+    "https://api.groq.com/*",
+    "https://api.x.ai/*",
+    "https://translate.googleapis.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "commands": {
+    "toggle": {
+      "suggested_key": {
+        "default": "Alt+T"
+      },
+      "description": "开 / 关当前标签页的字幕翻译"
+    }
+  }
+}

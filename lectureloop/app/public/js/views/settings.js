@@ -70,6 +70,20 @@ function VoiceCard({ settings }) {
 const CONF = { high: '把握较大', medium: '可能', low: '不确定' };
 
 /** API 密钥：一个输入框，按格式自动识别服务商，并向服务商发一次请求验证；可保存多个，分别指定“笔记/词汇”和“实时翻译”用哪个 */
+/** Chrome 字幕翻译插件：看网页视频（YouTube / Netflix 等）时实时翻译字幕。插件是单独安装的，这里提供下载与安装步骤。 */
+function ExtensionCard() {
+  return html`<div class="card"><h2>Chrome 字幕翻译插件 <span class="muted small">（看剧 / 看网页视频时实时翻译字幕）</span></h2>
+    <p class="small">法语 / 英语 / 中文互译，悬浮在视频画面上，全屏也能看。读取网页里已有的字幕（YouTube、Netflix、视频字幕轨道，或手动点选字幕位置）再翻译；不需要密钥也能用，填 AI 密钥后更贴合语气。</p>
+    <div class="row wrap"><a class="btn primary" href="downloads/lectureloop-subtitles.zip" download="lectureloop-subtitles.zip">⬇ 下载插件（zip）</a><span class="tiny muted">Chrome / Edge 116 或更新版本</span></div>
+    <ol class="small" style="margin:10px 0 0;padding-left:20px">
+      <li>下载后<b>解压</b>得到 <code>lectureloop-subtitles</code> 文件夹（不要删，Chrome 会一直从这里读取）。</li>
+      <li>地址栏打开 <code>chrome://extensions</code>，右上角打开“开发者模式”。</li>
+      <li>点“加载已解压的扩展程序”，选择刚才的文件夹。</li>
+      <li>打开一个有字幕的视频页面，点工具栏的插件图标（或按 <b>Alt+T</b>）开启。</li>
+    </ol>
+  </div>`;
+}
+
 function ByokCard({ config }) {
   const [key, setKey] = useState('');
   const [forced, setForced] = useState('');      // 高级：手动指定服务商
@@ -194,6 +208,8 @@ export function Settings() {
       </div>
 
       <${ByokCard} config=${config} />
+
+      <${ExtensionCard} />
 
       <${VoiceCard} settings=${settings} />
 

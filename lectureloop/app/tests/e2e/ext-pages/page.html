@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>字幕测试页</title>
+<style>body{margin:0;background:#222;color:#ddd;font:14px system-ui}#stage{position:relative;width:640px;height:360px;margin:20px auto;background:#000}video{width:640px;height:360px;display:block}
+/* 模拟 YouTube / Netflix / 自定义播放器的字幕层 */
+.ytp-caption-window-container{position:absolute;left:0;right:0;bottom:30px;text-align:center}.caption-window{display:inline-block;background:rgba(8,8,8,.75);color:#fff;padding:4px 8px}
+.player-timedtext{position:absolute;left:0;right:0;bottom:30px;text-align:center}.player-timedtext-text-container{display:block;color:#fff;font-size:22px}
+.my-subs{position:absolute;left:0;right:0;bottom:30px;text-align:center;color:#fff;font-size:22px}.my-subs .line{background:rgba(0,0,0,.6);padding:2px 8px}
+</style></head>
+<body><div id="stage">
+<video id="v" src="/silence.wav" width="640" height="360" muted preload="auto"></video>
+</div>
+<script>
+const mode = new URLSearchParams(location.search).get('mode') || 'track';
+const CUES = [
+  [0.0, 2.0, 'Salut, comment ça va ?'], [2.5, 4.5, "Je ne sais pas ce que vous voulez."], [5.0, 7.0, "C'est trop tard, il faut partir."],
+  [7.5, 9.5, "Où est-ce que tu vas ?"], [10, 12, 'Je vais chez moi, merci.'], [12.5, 14.5, "Qu'est-ce que vous faites ici ?"],
+  [15, 17, 'On doit parler, tous les deux.'], [17.5, 19.5, "Non, c'est impossible."], [20, 22, 'Il est très tard maintenant.'],
+  [22.5, 24.5, 'Alors, à demain peut-être.'], [25, 27, 'Oui, à demain, mon ami.'], [27.5, 29.5, 'Bonne nuit à tous.'], [30, 32, '你到底想要什么？'],
+];
+window.CUES = CUES;
+const v = document.getElementById('v');
+if (mode === 'track') {
+  const t = document.createElement('track'); t.kind = 'subtitles'; t.srclang = 'fr'; t.label = 'Français'; t.src = '/fr.vtt'; t.default = true; v.append(t);
+}
+const stage = document.getElementById('stage');
+function cueNow() { const t = v.currentTime; return CUES.find((c) => t >= c[0] && t < c[1]); }
+if (mode === 'yt') {
+  stage.insertAdjacentHTML('beforeend', '<div class="ytp-caption-window-container"></div>');
+  const box = stage.querySelector('.ytp-caption-window-container');
+  setInterval(() => { const c = cueNow(); box.innerHTML = c ? `<div class="caption-window"><span class="captions-text"><span class="ytp-caption-segment">${c[2]}</span></span></div>` : ''; }, 100);
+} else if (mode === 'netflix') {
+  stage.insertAdjacentHTML('beforeend', '<div class="player-timedtext"></div>');
+  const box = stage.querySelector('.player-timedtext');
+  setInterval(() => { const c = cueNow(); box.innerHTML = c ? `<div><span class="player-timedtext-text-container"><span>${c[2].split(' ').slice(0, 3).join(' ')}</span><span>${c[2].split(' ').slice(3).join(' ')}</span></span></div>` : ''; }, 100);
+} else if (mode === 'dom') {
+  stage.insertAdjacentHTML('beforeend', '<div class="my-subs"></div>');
+  const box = stage.querySelector('.my-subs');
+  setInterval(() => { const c = cueNow(); box.innerHTML = c ? `<span class="line">${c[2]}</span>` : ''; }, 100);
+}
+</script></body></html>
