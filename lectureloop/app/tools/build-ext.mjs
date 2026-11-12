@@ -11,7 +11,7 @@ import { cspOrigins } from '../public/js/lib/providers.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const EXT = resolve(here, '../../extension');
 const ZIP = resolve(here, '../public/downloads/lectureloop-subtitles.zip');
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 export function manifest() {
   return {
@@ -24,17 +24,22 @@ export function manifest() {
     icons: { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' },
     action: { default_title: '字幕翻译（Alt+T 开关）', default_popup: 'popup/popup.html', default_icon: { 16: 'icons/icon16.png', 32: 'icons/icon32.png' } },
     options_ui: { page: 'options/options.html', open_in_tab: true },
+    side_panel: { default_path: 'sidepanel/sidepanel.html' },
     background: { service_worker: 'dist/background.js' },
     content_scripts: [{ matches: ['<all_urls>'], js: ['dist/content.js'], all_frames: true, run_at: 'document_idle' }],
     // activeTab：点插件图标时临时获得当前标签页的地址与注入权（没有它，弹窗拿不到 tab.url，会误报“页面不支持”）；scripting：给装插件之前就已打开的页面补注入内容脚本
-    permissions: ['storage', 'activeTab', 'scripting'],
+    // sidePanel：字幕侧边栏；unlimitedStorage：保存字幕转录与翻译记忆（IndexedDB）不被浏览器当作可清理数据
+    permissions: ['storage', 'activeTab', 'scripting', 'sidePanel', 'unlimitedStorage'],
     host_permissions: [...cspOrigins().map((o) => o + '/*'), 'https://translate.googleapis.com/*', 'http://localhost/*', 'http://127.0.0.1/*'],
     optional_host_permissions: ['https://*/*', 'http://*/*'],
-    commands: { toggle: { suggested_key: { default: 'Alt+T' }, description: '开 / 关当前标签页的字幕翻译' } },
+    commands: {
+      toggle: { suggested_key: { default: 'Alt+T' }, description: '开 / 关当前标签页的字幕翻译' },
+      panel: { suggested_key: { default: 'Alt+S' }, description: '打开字幕侧边栏' },
+    },
   };
 }
 
-const ENTRIES = { background: 'src/background.js', content: 'src/content.js', popup: 'src/popup.js', options: 'src/options.js' };
+const ENTRIES = { background: 'src/background.js', content: 'src/content.js', popup: 'src/popup.js', options: 'src/options.js', sidepanel: 'src/sidepanel.js' };
 
 /** 打包全部入口；write=false 时只返回内容（测试用来检查提交的 dist 是否过期） */
 export async function bundle({ write = true } = {}) {
@@ -74,7 +79,7 @@ const walk = (dir) => readdirSync(dir).flatMap((f) => { const p = join(dir, f); 
 /** 打进 zip 的文件：运行需要的全部（不含 src/ 源码；源码在仓库里） */
 export function packageFiles() {
   const keep = ['manifest.json', 'ui.css', 'README.md'];
-  const dirs = ['dist', 'popup', 'options', 'icons'];
+  const dirs = ['dist', 'popup', 'options', 'sidepanel', 'icons'];
   const rels = [...keep, ...dirs.flatMap((d) => walk(join(EXT, d)).map((p) => relative(EXT, p)))].filter((r) => existsSync(join(EXT, r)));
   return rels.map((name) => ({ name: 'lectureloop-subtitles/' + name.split('\\').join('/'), data: readFileSync(join(EXT, name)) }));
 }

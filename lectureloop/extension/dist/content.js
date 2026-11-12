@@ -153,6 +153,19 @@
         const text = Array.from(track.activeCues || []).map((c) => clean(c.text)).filter(Boolean).join(" ");
         return text ? { text, lang: (track.language || "").slice(0, 2).toLowerCase() || null, video, rolling: false } : null;
       },
+      /** 整条轨道的全部句子（侧边栏转录用）：轨道已经载入且不止几句时才有。sig 变化说明轨道换了/又载入了新内容 */
+      allCues() {
+        const video = pickVideo(doc);
+        const track = video && this.track(video);
+        const cues = track?.cues;
+        if (!cues || cues.length < 3) return null;
+        const list = [];
+        for (let i = 0; i < cues.length; i++) {
+          const text = clean(cues[i].text);
+          if (text) list.push({ start: cues[i].startTime, end: cues[i].endTime, text });
+        }
+        return { sig: `${track.language}|${track.label}|${cues.length}`, lang: (track.language || "").slice(0, 2).toLowerCase() || null, cues: list };
+      },
       /** 即将出现的字幕（预翻译用）：整条轨道已经载入时才有 */
       upcoming(n = 30, ahead = 90) {
         const video = pickVideo(doc);
@@ -196,6 +209,168 @@
       if (r?.text) return { id: c.id, label: c.label, ...r };
     }
     return null;
+  }
+  function seekTo(doc, t, play = false) {
+    const v = pickVideo(doc);
+    if (!v) return false;
+    v.currentTime = Math.max(0, t);
+    if (play) v.play?.().catch(() => {
+    });
+    return true;
+  }
+
+  // ../extension/src/core/transcript.js
+  var norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").replace(/[^\p{L}\p{N} ]/gu, "").trim();
+  function findMatch(lines, text, start, tol = 3, norms = null) {
+    const n = norm(text);
+    if (!n) return -1;
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if ((norms ? norms[i] : norm(l.text)) !== n) continue;
+      const d = start >= l.start && start <= l.end ? 0 : Math.min(Math.abs(start - l.start), Math.abs(start - l.end));
+      if (d <= tol && d < bestD) {
+        best = i;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+  var lineId = (prefix, start, taken) => {
+    let id = `${prefix}${Math.round(start * 1e3)}`, k = 1;
+    while (taken.has(id)) id = `${prefix}${Math.round(start * 1e3)}_${k++}`;
+    return id;
+  };
+  function mergeLines(existing, incoming) {
+    const out = existing.map((l) => ({ ...l, tr: l.tr ? { ...l.tr } : void 0 }));
+    const norms = out.map((l) => norm(l.text));
+    const byId = new Map(out.map((l) => [l.id, l]));
+    const idx = new Map(out.map((l, i) => [l.id, i]));
+    for (const inc of incoming) {
+      const n = norm(inc.text);
+      let cur = byId.get(inc.id);
+      if (cur && norms[idx.get(inc.id)] !== n) cur = null;
+      if (!cur && !inc.id.startsWith("t")) {
+        const i = findMatch(out, inc.text, inc.start, 3, norms);
+        if (i >= 0) cur = out[i];
+      }
+      if (cur) {
+        cur.end = Math.max(cur.end, inc.end);
+        if (inc.tr) cur.tr = { ...cur.tr, ...inc.tr };
+      } else {
+        const l = { ...inc, tr: inc.tr ? { ...inc.tr } : void 0 };
+        if (byId.has(l.id)) l.id = lineId("x", l.start, byId);
+        out.push(l);
+        norms.push(n);
+        byId.set(l.id, l);
+        idx.set(l.id, out.length - 1);
+      }
+    }
+    return out.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1));
+  }
+
+  // ../extension/src/core/recorder.js
+  var Recorder = class {
+    constructor() {
+      this.reset(null);
+    }
+    reset(meta) {
+      this.meta = meta;
+      this.lines = [];
+      this.dirty = /* @__PURE__ */ new Set();
+      this.loadedTrack = "";
+    }
+    /** 载入已保存的转录（不算"变化"） */
+    load(lines) {
+      this.lines = mergeLines([], lines || []);
+    }
+    /** 字幕轨道的全部句子：cues = [{start,end,text}]。已有的（含译文）保留 */
+    loadAll(cues, lang) {
+      const incoming = cues.filter((c) => norm(c.text)).map((c) => ({ id: `t${Math.round(c.start * 1e3)}`, start: c.start, end: c.end, text: c.text, lang }));
+      const before = new Map(this.lines.map((l) => [l.id, l.end + "|" + l.text]));
+      this.lines = mergeLines(this.lines, incoming);
+      for (const l of this.lines) if (!before.has(l.id) || before.get(l.id) !== l.end + "|" + l.text) this.dirty.add(l.id);
+    }
+    /** 网站字幕稳定下来的一句：返回它的 id（已有的就复用） */
+    observe(text, t, lang) {
+      const i = findMatch(this.lines, text, t);
+      if (i >= 0) {
+        const l2 = this.lines[i];
+        if (t > l2.end) {
+          l2.end = t;
+          this.dirty.add(l2.id);
+        }
+        return l2.id;
+      }
+      const prev = this.lines.filter((l2) => l2.start <= t && t - l2.end < 2).at(-1);
+      if (prev && norm(text).startsWith(norm(prev.text)) && prev.id.startsWith("d")) {
+        prev.text = text;
+        prev.end = t;
+        delete prev.tr;
+        this.dirty.add(prev.id);
+        return prev.id;
+      }
+      const l = { id: lineId("d", t, new Set(this.lines.map((x) => x.id))), start: t, end: t, text, lang };
+      this.lines = mergeLines(this.lines, [l]);
+      this.dirty.add(l.id);
+      return l.id;
+    }
+    /** 当前句还在显示：把结束时间推到 t */
+    touch(id, t) {
+      const l = this.lines.find((x) => x.id === id);
+      if (l && t > l.end) {
+        l.end = t;
+        this.dirty.add(id);
+      }
+    }
+    /** 译文回来了：补给所有同文的句子 */
+    attach(text, tr) {
+      const n = norm(text);
+      for (const l of this.lines) if (norm(l.text) === n) {
+        l.tr = { ...l.tr, ...tr };
+        this.dirty.add(l.id);
+      }
+    }
+    /** 此刻 t 对应的句子 id（字幕轨道：时间落在哪句；找不到返回 ''） */
+    idAt(t) {
+      const l = this.lines.find((x) => t >= x.start && t < x.end);
+      return l?.id || "";
+    }
+    /** 缺少某些目标语言译文的句子 */
+    missing(targets) {
+      return this.lines.filter((l) => targets.some((t) => !l.tr?.[t]));
+    }
+    /** 取走变化的行（同时清空标记） */
+    take() {
+      const out = this.lines.filter((l) => this.dirty.has(l.id));
+      this.dirty.clear();
+      return out;
+    }
+    get hasDirty() {
+      return this.dirty.size > 0;
+    }
+  };
+
+  // ../extension/src/core/videokey.js
+  var DROP = /^(utm_|fbclid$|gclid$|t$|start$|time$|list$|index$|feature$|pp$|si$)/i;
+  function videoKeyOf(loc) {
+    let u;
+    try {
+      u = new URL(loc.href);
+    } catch {
+      return { key: `x:${loc.hostname || ""}${loc.pathname || ""}`, site: loc.hostname || "", url: loc.href || "" };
+    }
+    const host = u.hostname.replace(/^www\./, "");
+    let id = null;
+    if (/(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(host)) id = u.searchParams.get("v") || u.pathname.match(/^\/(?:embed|shorts|live)\/([\w-]{6,})/)?.[1];
+    if (id) return { key: `yt:${id}`, site: host, url: `https://www.youtube.com/watch?v=${id}` };
+    if (/(^|\.)netflix\.com$/.test(host)) {
+      const m = u.pathname.match(/\/watch\/(\d+)/);
+      if (m) return { key: `nf:${m[1]}`, site: host, url: `https://www.netflix.com/watch/${m[1]}` };
+    }
+    const params = [...u.searchParams].filter(([k]) => !DROP.test(k)).sort(([a], [b]) => a < b ? -1 : 1);
+    const q = params.length ? "?" + params.map(([k, v]) => `${k}=${v}`).join("&") : "";
+    return { key: `u:${host}${u.pathname.replace(/\/+$/, "")}${q}`, site: host, url: u.origin + u.pathname + q };
   }
 
   // ../extension/src/core/stabilizer.js
@@ -242,7 +417,9 @@
   // ../extension/src/core/translator.js
   var TranslateQueue = class {
     /** send({source,targets,items:[{i,t}],context}) → Promise<{provider?,note?,results:{zh:[{i,t}]}}> */
-    constructor({ send, maxBatch = 8, bgBatch = 12, cap = 3e3, onError, onOk, now = () => Date.now() }) {
+    constructor({ send, maxBatch = 8, bgBatch = 12, cap = 3e3, onError, onOk, onResult, now = () => Date.now() }) {
+      this.onResult = onResult || (() => {
+      });
       this.send = send;
       this.maxBatch = maxBatch;
       this.bgBatch = bgBatch;
@@ -267,6 +444,10 @@
     }
     clear() {
       this.cache.clear();
+    }
+    /** 直接放入一条已知的译文（来自已保存的转录）：这句再出现时立即命中，不请求翻译 */
+    seed(text, source, targets, tr) {
+      this._store(this.key(text, source, targets), tr);
     }
     /** → Promise<{[target]: string}>；失败时得到 {} */
     translate(text, { source = "auto", targets, context = [], prio = "live" }) {
@@ -333,6 +514,7 @@
           if (Object.keys(out).length) {
             this._store(e.key, out);
             this.stats.ok++;
+            this.onResult({ text: e.text, source: e.source, targets: e.targets, tr: out });
           }
           this.pendingByKey.delete(e.key);
           e.resolve(out);
@@ -558,14 +740,23 @@
      * @param o.send       (req) => Promise<result>   翻译请求（发给 background，或在页面里用 Chrome 内置翻译）
      * @param o.saveSettings (patch) => void           悬浮层里的操作要写回设置
      * @param o.report     (status) => void            把状态报告给弹窗
+     * @param o.rpc        (type, payload) => Promise  向后台读写转录（tx-get / tx-upsert）
      */
     constructor({ doc = globalThis.document, site, settings, send, saveSettings: saveSettings2, report = () => {
-    }, timers = void 0 }) {
+    }, rpc = async () => ({}), timers = void 0 }) {
       this.doc = doc;
       this.site = site;
       this.settings = settings;
       this.saveSettings = saveSettings2;
       this.report = report;
+      this.rpc = rpc;
+      this.rec = new Recorder();
+      this.vk = null;
+      this.ready = false;
+      this.curLineId = "";
+      this.flushTimer = 0;
+      this.loop = null;
+      this.cachedHits = 0;
       this.on = false;
       this.cur = "";
       this.src = null;
@@ -582,7 +773,12 @@
         onOk: (r) => {
           this.error = "";
           this.note = r?.note || "";
-          this.provider = r?.provider || this.provider;
+          if (r?.provider && r.provider !== "cache") this.provider = r.provider;
+          this.cachedHits += r?.cached || 0;
+        },
+        onResult: ({ text, tr }) => {
+          this.rec.attach(text, tr);
+          this._flushSoon();
         }
       });
       this.stab = new Stabilizer({ onSettle: (t) => this._translate(t), ...timers ? { timers } : {} });
@@ -606,6 +802,10 @@
       this.on = false;
       clearInterval(this.timer);
       clearInterval(this.pf);
+      this.clearLoop();
+      this._flush();
+      this.vk = null;
+      this.ready = false;
       this.stab.clear();
       this.sources?.textTrack.restore();
       this.styleEl?.remove();
@@ -631,6 +831,7 @@
         this.queue.clear();
         if (this.cur) this._translate(this.cur);
       }
+      if (prev.targets.join() !== s.targets.join()) this._seedFromLines();
       this._render();
     }
     _ov() {
@@ -674,10 +875,12 @@
     }
     _tick() {
       if (!this.on || this.doc.hidden) return;
+      this._checkVideo();
       const found = readFirst(this.sources);
       if (found) {
         this.src = found;
         this.lastSeen = Date.now();
+        this.curVideo = found.video || this.curVideo;
       } else if (Date.now() - this.lastSeen > 8e3) this.src = null;
       this.overlay.setAnchor(found?.video || this.src?.video || null);
       this.overlay.layout();
@@ -692,12 +895,18 @@
       const text = this.stab.push(raw, found?.rolling);
       if (text !== this.cur) {
         this.cur = text;
+        this.curLineId = "";
         this._render();
+      }
+      if (this.ready) {
+        this._loadTrack();
+        if (this.curLineId) this.rec.touch(this.curLineId, this._now());
       }
       this._status();
     }
     _translate(text) {
       if (!text) return;
+      this._record(text);
       const { source, targets } = this._lineInfo(text);
       if (!targets.length) return;
       this.queue.translate(text, { source, targets, context: this.recent.slice(-3), prio: "live" }).then(() => {
@@ -732,6 +941,116 @@
         this.queue.translate(c.text, { source, targets, context: c.prev ? [c.prev] : [], prio: "bg" });
       }
     }
+    // ---------- 转录记录 ----------
+    _now() {
+      const v = this.curVideo?.isConnected ? this.curVideo : pickVideo(this.doc);
+      return v ? v.currentTime : 0;
+    }
+    /** 视频换了（地址变化：YouTube 自动播放下一个、Netflix 换集）→ 换一份转录，并读出之前保存的 */
+    _checkVideo() {
+      const loc = this.doc.defaultView?.location;
+      if (!loc) return;
+      const k = videoKeyOf(loc);
+      if (this.vk?.key === k.key) return;
+      this.vk = { ...k, title: (this.doc.title || "").trim() };
+      this.ready = false;
+      this.curLineId = "";
+      this.recent = [];
+      this.rec.reset(this.vk);
+      const key = k.key;
+      this.rpc("tx-get", { key }).then((r) => {
+        if (this.vk?.key !== key) return;
+        if (r?.video?.lines?.length) {
+          this.rec.load(r.video.lines);
+          this._seedFromLines();
+        }
+        this.ready = true;
+      }).catch(() => {
+        this.ready = true;
+      });
+    }
+    /** 已保存的转录里有译文的句子，直接放进翻译缓存：同一个视频再看 / 循环播放时立即显示，不用请求 */
+    _seedFromLines() {
+      for (const l of this.rec.lines) {
+        const { source, targets } = this._lineInfo(l.text);
+        if (!targets.length || !targets.every((t) => l.tr?.[t])) continue;
+        this.queue.seed(l.text, source, targets, Object.fromEntries(targets.map((t) => [t, l.tr[t]])));
+      }
+      this._render();
+    }
+    /** 字幕轨道整条载入：一次性把全部句子放进转录（侧边栏立刻能看到整部剧） */
+    _loadTrack() {
+      const all = this.sources?.textTrack.allCues?.();
+      if (!all || all.sig === this.rec.loadedTrack) return;
+      this.rec.loadedTrack = all.sig;
+      this.rec.loadAll(all.cues, all.lang);
+      this._seedFromLines();
+      this._flushSoon();
+    }
+    /** 一句稳定下来：记进转录，并记下它的 id（侧边栏据此高亮当前句） */
+    _record(text) {
+      if (!this.vk) return;
+      const lang = this.src?.lang || this._lineInfo(text).source;
+      this.curLineId = this.rec.observe(text, Math.max(0, this._now() - 0.15), lang);
+      this._flushSoon();
+    }
+    _flushSoon() {
+      if (!this.flushTimer) this.flushTimer = setTimeout(() => this._flush(), 2e3);
+    }
+    _flush() {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = 0;
+      if (!this.vk || !this.rec.hasDirty) return;
+      const lines = this.rec.take();
+      const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || "").trim() || this.vk.title, lang: this.src?.lang || lines[0]?.lang || null };
+      this.rpc("tx-upsert", { video: meta, lines }).catch(() => {
+      });
+    }
+    // ---------- 侧边栏的指令 ----------
+    seek(t, play) {
+      return seekTo(this.doc, t, play);
+    }
+    /** 循环播放 [start,end]：用 requestAnimationFrame 盯着播放位置（timeupdate 一秒才 4 次，会冲过头） */
+    setLoop(start, end) {
+      this.clearLoop();
+      const v = pickVideo(this.doc);
+      if (!v) return false;
+      const s = Math.max(0, start), e = Math.max(end, s + 1.5);
+      this.loop = { s, e, raf: 0 };
+      const win = this.doc.defaultView;
+      const step = () => {
+        if (!this.loop) return;
+        if (v.currentTime >= e - 0.03 || v.currentTime < s - 0.6) {
+          v.currentTime = s;
+          if (v.paused) v.play?.().catch(() => {
+          });
+        }
+        this.loop.raf = win.requestAnimationFrame(step);
+      };
+      v.currentTime = s;
+      v.play?.().catch(() => {
+      });
+      step();
+      return true;
+    }
+    clearLoop() {
+      if (this.loop) {
+        this.doc.defaultView?.cancelAnimationFrame(this.loop.raf);
+        this.loop = null;
+      }
+    }
+    /** 把转录里还没有译文的句子全部排进翻译队列（低优先级，不挡当前这句）。返回排了多少句 */
+    translateAll() {
+      let n = 0;
+      const lines = this.rec.lines;
+      lines.forEach((l, i) => {
+        const { source, targets } = this._lineInfo(l.text);
+        if (!targets.length || targets.every((t) => l.tr?.[t])) return;
+        n++;
+        this.queue.translate(l.text, { source, targets, context: lines[i - 1] ? [lines[i - 1].text] : [], prio: "bg" });
+      });
+      return n;
+    }
     _status() {
       const s = {
         on: this.on,
@@ -739,9 +1058,11 @@
         source: this.src ? { id: this.src.id, label: this.src.label, lang: this.src.lang } : null,
         translated: this.queue.stats.ok,
         failed: this.queue.stats.failed,
+        cached: this.cachedHits,
         error: this.error,
         note: this.note,
-        provider: this.provider || ""
+        provider: this.provider || "",
+        video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null
       };
       const j = JSON.stringify(s);
       if (j !== this.lastStatus) {
@@ -925,11 +1246,13 @@
       }
       throw new Error(r?.error?.message || "\u7FFB\u8BD1\u5931\u8D25");
     }
+    const rpc = (type, payload) => rt.sendMessage({ type, ...payload });
     const ctl = new Controller({
       site,
       settings,
       send,
       report,
+      rpc,
       saveSettings: (p) => saveSettings(p)
     });
     const setOn = (on) => {
@@ -947,7 +1270,15 @@
     rt.onMessage.addListener((msg, _sender, reply) => {
       if (msg?.type === "setEnabled") setOn(!!msg.on);
       else if (msg?.type === "ping") reply({ on: ctl.on, site, top: isTop });
-      else if (msg?.type === "pick") {
+      else if (msg?.type === "seek") {
+        if (ctl.seek(msg.t, msg.play)) reply({ ok: true });
+      } else if (msg?.type === "loop") {
+        if (ctl.setLoop(msg.start, msg.end)) reply({ ok: true });
+      } else if (msg?.type === "loopClear") {
+        ctl.clearLoop();
+      } else if (msg?.type === "translateAll") {
+        if (ctl.on && ctl.rec.lines.length) reply({ n: ctl.translateAll() });
+      } else if (msg?.type === "pick") {
         if (!shouldPick()) return;
         if (!ctl.on) ctl.start();
         picker?.cancel();

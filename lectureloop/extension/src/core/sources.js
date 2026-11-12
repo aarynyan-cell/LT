@@ -69,6 +69,16 @@ function textTrackCandidate(doc, settings, saved) {
       const text = Array.from(track.activeCues || []).map((c) => clean(c.text)).filter(Boolean).join(' ');
       return text ? { text, lang: (track.language || '').slice(0, 2).toLowerCase() || null, video, rolling: false } : null;
     },
+    /** 整条轨道的全部句子（侧边栏转录用）：轨道已经载入且不止几句时才有。sig 变化说明轨道换了/又载入了新内容 */
+    allCues() {
+      const video = pickVideo(doc);
+      const track = video && this.track(video);
+      const cues = track?.cues;
+      if (!cues || cues.length < 3) return null;
+      const list = [];
+      for (let i = 0; i < cues.length; i++) { const text = clean(cues[i].text); if (text) list.push({ start: cues[i].startTime, end: cues[i].endTime, text }); }
+      return { sig: `${track.language}|${track.label}|${cues.length}`, lang: (track.language || '').slice(0, 2).toLowerCase() || null, cues: list };
+    },
     /** 即将出现的字幕（预翻译用）：整条轨道已经载入时才有 */
     upcoming(n = 30, ahead = 90) {
       const video = pickVideo(doc);
@@ -108,4 +118,13 @@ export function readFirst(sources) {
     if (r?.text) return { id: c.id, label: c.label, ...r };
   }
   return null;
+}
+
+/** 把视频跳到 t 秒（可选播放）。没有视频返回 false */
+export function seekTo(doc, t, play = false) {
+  const v = pickVideo(doc);
+  if (!v) return false;
+  v.currentTime = Math.max(0, t);
+  if (play) v.play?.().catch(() => {});
+  return true;
 }

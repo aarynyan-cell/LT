@@ -281,7 +281,7 @@
       lines.push(h("div", {}, "\u2026 \u8FD8\u6CA1\u627E\u5230\u5B57\u5E55\u3002\u8BF7\u5148\u5728\u64AD\u653E\u5668\u91CC\u6253\u5F00\u5B57\u5E55\uFF1B\u6CA1\u6709\u53CD\u5E94\u5C31\u70B9\u201C\u9009\u53D6\u5B57\u5E55\u4F4D\u7F6E\u201D\u3002"));
     }
     const eng = best.provider === "gtx" ? "Google \u514D\u8D39\u7FFB\u8BD1" : best.provider?.startsWith("ai:") ? `AI\uFF08${PROVIDERS[best.provider.slice(3)]?.name || best.provider}\uFF09` : best.provider === "chrome" ? "Chrome \u5185\u7F6E\u7FFB\u8BD1" : "";
-    if (best.translated || eng) lines.push(h("div", { class: "tiny muted" }, `\u5DF2\u7FFB\u8BD1 ${best.translated} \u53E5${eng ? " \xB7 \u5F15\u64CE\uFF1A" + eng : ""}`));
+    if (best.translated || best.cached || eng) lines.push(h("div", { class: "tiny muted" }, `\u5DF2\u7FFB\u8BD1 ${best.translated} \u53E5${best.cached ? `\uFF08${best.cached} \u53E5\u6765\u81EA\u672C\u5730\u7F13\u5B58\uFF09` : ""}${eng ? " \xB7 \u5F15\u64CE\uFF1A" + eng : ""}`));
     if (best.note) {
       tone = "warn";
       lines.push(h("div", { class: "tiny" }, best.note));
@@ -359,6 +359,12 @@
             });
             if (!q.get("tabId")) window.close();
           } }, "\u9009\u53D6\u5B57\u5E55\u4F4D\u7F6E"),
+          h("button", { class: "btn grow", id: "panel", title: "\u6253\u5F00\u5B57\u5E55\u4FA7\u8FB9\u680F\uFF1A\u6574\u6BB5\u5B57\u5E55\u3001\u6536\u85CF\u5355\u8BCD\u548C\u53E5\u5B50\uFF08Alt+S\uFF09", onClick: () => {
+            chrome.sidePanel.open({ tabId: tab.id }).then(() => {
+              if (!q.get("tabId")) window.close();
+            }).catch(() => {
+            });
+          } }, "\u{1F4D6} \u5B57\u5E55\u4FA7\u8FB9\u680F"),
           h("button", { class: "btn grow", id: "reset", title: "\u6062\u590D\u9ED8\u8BA4\u4F4D\u7F6E\uFF0C\u5E76\u6E05\u9664\u8FD9\u4E2A\u7F51\u7AD9\u4E0A\u624B\u52A8\u9009\u53D6\u7684\u5B57\u5E55\u4F4D\u7F6E", onClick: () => set({ pos: null, pickers: Object.fromEntries(Object.entries(settings.pickers).filter(([k]) => k !== site)) }) }, "\u91CD\u7F6E\u4F4D\u7F6E")
         )
       ),

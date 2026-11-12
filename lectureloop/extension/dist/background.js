@@ -429,6 +429,173 @@ ${JSON.stringify(schema)}`;
     throw last || new ApiError("no_provider", "\u6CA1\u6709\u53EF\u7528\u7684\u7FFB\u8BD1\u5F15\u64CE");
   }
 
+  // ../extension/src/core/tm.js
+  var tmKey = (source, target, text) => `${source}|${target}|${text}`;
+  async function translateWithTM(req, { getMany, putMany, run: run2, wantAI = false }) {
+    const { source = "auto", targets, items } = req;
+    const found = await getMany(items.flatMap((it) => targets.map((t) => tmKey(source, t, it.t))));
+    const results = Object.fromEntries(targets.map((t) => [t, []]));
+    const miss = [];
+    let hits = 0;
+    for (const it of items) {
+      const per = {};
+      let ok = true;
+      for (const t of targets) {
+        const e = found.get(tmKey(source, t, it.t));
+        if (!e || !e.t || wantAI && e.p === "gtx") {
+          ok = false;
+          break;
+        }
+        per[t] = e.t;
+      }
+      if (ok) {
+        hits++;
+        for (const t of targets) results[t].push({ i: it.i, t: per[t] });
+      } else miss.push(it);
+    }
+    let provider = "cache", note = "";
+    if (miss.length) {
+      const r = await run2({ ...req, items: miss });
+      provider = r.provider;
+      note = r.note || "";
+      const entries = [];
+      for (const t of targets) for (const x of r.results?.[t] || []) {
+        results[t].push(x);
+        const src = miss.find((m) => m.i === x.i);
+        if (src && x.t) entries.push({ k: tmKey(source, t, src.t), t: x.t, p: provider.startsWith("ai:") ? "ai" : provider, ts: Date.now() });
+      }
+      if (entries.length) await putMany(entries).catch(() => {
+      });
+    }
+    for (const t of targets) results[t].sort((a, b) => a.i - b.i);
+    return { provider, results, note, cached: hits };
+  }
+
+  // ../extension/src/core/transcript.js
+  var norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").replace(/[^\p{L}\p{N} ]/gu, "").trim();
+  function findMatch(lines, text, start, tol = 3, norms = null) {
+    const n = norm(text);
+    if (!n) return -1;
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if ((norms ? norms[i] : norm(l.text)) !== n) continue;
+      const d = start >= l.start && start <= l.end ? 0 : Math.min(Math.abs(start - l.start), Math.abs(start - l.end));
+      if (d <= tol && d < bestD) {
+        best = i;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+  var lineId = (prefix, start, taken) => {
+    let id = `${prefix}${Math.round(start * 1e3)}`, k = 1;
+    while (taken.has(id)) id = `${prefix}${Math.round(start * 1e3)}_${k++}`;
+    return id;
+  };
+  function mergeLines(existing, incoming) {
+    const out = existing.map((l) => ({ ...l, tr: l.tr ? { ...l.tr } : void 0 }));
+    const norms = out.map((l) => norm(l.text));
+    const byId = new Map(out.map((l) => [l.id, l]));
+    const idx = new Map(out.map((l, i) => [l.id, i]));
+    for (const inc of incoming) {
+      const n = norm(inc.text);
+      let cur = byId.get(inc.id);
+      if (cur && norms[idx.get(inc.id)] !== n) cur = null;
+      if (!cur && !inc.id.startsWith("t")) {
+        const i = findMatch(out, inc.text, inc.start, 3, norms);
+        if (i >= 0) cur = out[i];
+      }
+      if (cur) {
+        cur.end = Math.max(cur.end, inc.end);
+        if (inc.tr) cur.tr = { ...cur.tr, ...inc.tr };
+      } else {
+        const l = { ...inc, tr: inc.tr ? { ...inc.tr } : void 0 };
+        if (byId.has(l.id)) l.id = lineId("x", l.start, byId);
+        out.push(l);
+        norms.push(n);
+        byId.set(l.id, l);
+        idx.set(l.id, out.length - 1);
+      }
+    }
+    return out.sort((a, b) => a.start - b.start || (a.id < b.id ? -1 : 1));
+  }
+
+  // ../extension/src/core/store.js
+  var NAME = "lectureloop-subs";
+  var TM_MAX = 4e4;
+  var TM_PRUNE = 8e3;
+  var dbp;
+  var db = () => dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open(NAME, 1);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      d.createObjectStore("videos", { keyPath: "key" });
+      d.createObjectStore("tm", { keyPath: "k" }).createIndex("ts", "ts");
+      d.createObjectStore("saved", { keyPath: "id" }).createIndex("ts", "ts");
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  async function run(stores, mode, fn) {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const t = d.transaction(stores, mode);
+      const out = fn(...[].concat(stores).map((s) => t.objectStore(s)), t);
+      t.oncomplete = () => res(out && "result" in out ? out.result : out);
+      t.onerror = t.onabort = () => rej(t.error);
+    });
+  }
+  var getVideo = (key) => run("videos", "readonly", (s) => s.get(key));
+  async function upsertVideo(meta, lines) {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const t = d.transaction("videos", "readwrite");
+      const s = t.objectStore("videos");
+      const g = s.get(meta.key);
+      g.onsuccess = () => {
+        const cur = g.result || { key: meta.key, lines: [] };
+        const next = { ...cur, ...meta, lines: mergeLines(cur.lines, lines), updated: Date.now() };
+        s.put(next);
+      };
+      t.oncomplete = () => res(true);
+      t.onerror = t.onabort = () => rej(t.error);
+    });
+  }
+  async function tmGetMany(keys) {
+    const out = /* @__PURE__ */ new Map();
+    if (!keys.length) return out;
+    const d = await db();
+    return new Promise((res, rej) => {
+      const t = d.transaction("tm", "readonly");
+      const s = t.objectStore("tm");
+      for (const k of keys) s.get(k).onsuccess = (e) => {
+        if (e.target.result) out.set(k, e.target.result);
+      };
+      t.oncomplete = () => res(out);
+      t.onerror = t.onabort = () => rej(t.error);
+    });
+  }
+  async function tmPutMany(entries) {
+    await run("tm", "readwrite", (s) => {
+      for (const e of entries) s.put(e);
+    });
+    const n = await run("tm", "readonly", (s) => s.count());
+    if (n > TM_MAX) await tmPrune(n - TM_MAX + TM_PRUNE);
+  }
+  async function tmPrune(count) {
+    await run("tm", "readwrite", (s) => {
+      let left = count;
+      s.index("ts").openCursor().onsuccess = (e) => {
+        const c = e.target.result;
+        if (c && left-- > 0) {
+          c.delete();
+          c.continue();
+        }
+      };
+    });
+  }
+
   // ../extension/src/background.js
   try {
     chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -440,11 +607,25 @@ ${JSON.stringify(schema)}`;
       (async () => {
         try {
           const [keys, settings] = await Promise.all([loadKeys(), loadSettings()]);
-          reply({ ok: true, result: await translateBatch(msg, { keys, endpoints: settings.endpoints }) });
+          const run2 = (r) => translateBatch(r, { keys, endpoints: settings.endpoints });
+          const wantAI = !!selection(keys) && msg.engine !== "gtx";
+          reply({ ok: true, result: await translateWithTM(msg, { getMany: tmGetMany, putMany: tmPutMany, run: run2, wantAI }) });
         } catch (e) {
           reply(err(e));
         }
       })();
+      return true;
+    }
+    if (msg?.type === "tx-get") {
+      getVideo(msg.key).then((video) => reply({ ok: true, video })).catch((e) => reply(err(e)));
+      return true;
+    }
+    if (msg?.type === "tx-upsert") {
+      upsertVideo(msg.video, msg.lines).then(() => {
+        reply({ ok: true });
+        chrome.runtime.sendMessage({ type: "tx-updated", key: msg.video.key }).catch(() => {
+        });
+      }).catch((e) => reply(err(e)));
       return true;
     }
     if (msg?.type === "status" && sender.tab) {
@@ -462,6 +643,12 @@ ${JSON.stringify(schema)}`;
     if (dead.length) chrome.storage.session.remove(dead);
   });
   chrome.commands.onCommand.addListener(async (cmd) => {
+    if (cmd === "panel") {
+      const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (t?.id) chrome.sidePanel.open({ tabId: t.id }).catch(() => {
+      });
+      return;
+    }
     if (cmd !== "toggle") return;
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) return;

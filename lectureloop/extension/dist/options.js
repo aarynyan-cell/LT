@@ -494,13 +494,47 @@ ${JSON.stringify(schema)}`;
     }
   }
 
+  // ../extension/src/core/store.js
+  var NAME = "lectureloop-subs";
+  var dbp;
+  var db = () => dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open(NAME, 1);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      d.createObjectStore("videos", { keyPath: "key" });
+      d.createObjectStore("tm", { keyPath: "k" }).createIndex("ts", "ts");
+      d.createObjectStore("saved", { keyPath: "id" }).createIndex("ts", "ts");
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  async function run(stores, mode, fn) {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const t = d.transaction(stores, mode);
+      const out = fn(...[].concat(stores).map((s) => t.objectStore(s)), t);
+      t.oncomplete = () => res(out && "result" in out ? out.result : out);
+      t.onerror = t.onabort = () => rej(t.error);
+    });
+  }
+  async function stats() {
+    const [videos, tm, saved] = await Promise.all([run("videos", "readonly", (s) => s.count()), run("tm", "readonly", (s) => s.count()), run("saved", "readonly", (s) => s.count())]);
+    return { videos, tm, saved };
+  }
+  var clearTranscripts = async () => {
+    await run("videos", "readwrite", (s) => s.clear());
+    await run("tm", "readwrite", (s) => s.clear());
+  };
+
   // ../extension/src/options.js
   var app = document.getElementById("app");
   var state = { keys: {}, use: "" };
   var msg = null;
   var busy = false;
+  var dbStats = null;
   var refresh = async () => {
     state = await loadKeys();
+    dbStats = await stats().catch(() => null);
     render();
   };
   var say = (tone, text) => {
@@ -624,6 +658,23 @@ ${JSON.stringify(schema)}`;
             } }, "\u5220\u9664")
           );
         }) : h("div", { class: "muted" }, "\u8FD8\u6CA1\u6709\u3002")
+      ),
+      h(
+        "div",
+        { class: "card" },
+        h("h2", {}, "\u672C\u5730\u6570\u636E"),
+        h("div", { class: "muted", id: "dbstats" }, dbStats ? `\u5DF2\u4FDD\u5B58 ${dbStats.videos} \u4E2A\u89C6\u9891\u7684\u5B57\u5E55\u3001${dbStats.tm} \u6761\u7FFB\u8BD1\u8BB0\u5FC6\u3001${dbStats.saved} \u4E2A\u6536\u85CF\u3002` : "\u2026"),
+        h(
+          "div",
+          { class: "row", style: "margin-top:8px" },
+          h("button", { class: "btn danger", id: "clear-tx", onClick: async () => {
+            if (!confirm("\u6E05\u9664\u6240\u6709\u89C6\u9891\u7684\u5B57\u5E55\u8BB0\u5F55\u548C\u7FFB\u8BD1\u8BB0\u5FC6\uFF1F\uFF08\u4E0D\u5F71\u54CD\u6536\u85CF\u7684\u5355\u8BCD\u548C\u53E5\u5B50\uFF09")) return;
+            await clearTranscripts();
+            dbStats = await stats();
+            say("ok", "\u5DF2\u6E05\u9664\u5B57\u5E55\u8BB0\u5F55\u4E0E\u7FFB\u8BD1\u8BB0\u5FC6\u3002");
+          } }, "\u6E05\u9664\u5B57\u5E55\u8BB0\u5F55\u4E0E\u7FFB\u8BD1\u8BB0\u5FC6"),
+          h("span", { class: "tiny muted" }, "\u8FD9\u4E9B\u6570\u636E\u53EA\u5728\u8FD9\u53F0\u7535\u8111\u7684\u6D4F\u89C8\u5668\u91CC\uFF1B\u6709\u4E86\u5B83\u4EEC\uFF0C\u540C\u4E00\u4E2A\u89C6\u9891\u518D\u770B\u4E00\u904D\u4E0D\u4F1A\u91CD\u590D\u7FFB\u8BD1\u3002")
+        )
       ),
       h(
         "div",

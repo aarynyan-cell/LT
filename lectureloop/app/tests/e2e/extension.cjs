@@ -37,6 +37,7 @@ const MOCK = 'http://127.0.0.1:8788';
 
   let fails = 0;
   const step = async (name, fn) => {
+    if (process.env.ONLY && !name.includes(process.env.ONLY)) return; // 调试：只跑名字里包含 ONLY 的步骤
     try { await fn(); console.log('✔', name); } catch (e) { fails++; console.log('✘', name, '→', e.message.split('\n')[0]); }
   };
   const until = async (fn, ms = 9000, what = '条件') => {
@@ -49,6 +50,10 @@ const MOCK = 'http://127.0.0.1:8788';
   // ----- 工具：设置 / 状态 / 悬浮层 -----
   const resetStore = async () => {
     await admin.evaluate(async () => { await chrome.storage.sync.clear(); await chrome.storage.local.clear(); await chrome.storage.session.clear(); });
+    // 清空字幕记录与翻译记忆：不然上一个测试留下的译文会被直接复用（这正是它的功能）
+    admin.once('dialog', (d) => d.accept());
+    await admin.reload(); await admin.locator('#clear-tx').click();
+    await until(async () => /已保存 0 个视频的字幕、0 条翻译记忆/.test(await admin.locator('#dbstats').textContent()), 4000, '字幕记录已清空');
     for (const k of Object.keys(last)) delete last[k];
   };
   const setSync = (patch) => admin.evaluate((p) => chrome.storage.sync.set(p), patch);
@@ -195,6 +200,121 @@ const MOCK = 'http://127.0.0.1:8788';
     await until(async () => (await ov(p))?.t1?.startsWith('[g:zh-CN] Je ne sais pas'), 9000, '开启后显示译文');
     await pop.locator('#always').check();
     await until(async () => (await getSync()).sites?.['www.example.test'] === true, 3000, '“总是开启”记在这个网站下');
+    await pop.close(); await closeExtra();
+  });
+
+  // ================= 侧边栏 =================
+  const panelFor = async (tid) => { const pn = await ctx.newPage(); watch(pn, 'panel'); await pn.goto(`chrome-extension://${id}/sidepanel/sidepanel.html?tabId=${tid}`); await pn.waitForSelector('.head'); await pn.locator('[data-tab=lines]').click(); return pn; };
+
+  await step('侧边栏：字幕轨道整条载入 + 译文逐步出现 + 点句子跳转 + 当前句高亮 + 循环这一句', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true } }));
+    const p = await open(PAGE + '?mode=track');
+    await seek(p, 0.3, true);
+    const pn = await panelFor(await tabId(':8799/page.html?mode=track'));
+    await until(async () => (await pn.locator('.ln').count()) === 13, 9000, '13 句字幕一次性全部列出来');
+    eq(await pn.locator('.sub').textContent(), '字幕测试页', '视频标题');
+    await until(async () => (await pn.locator('.ln').first().locator('.tr').textContent()) === '[g:zh-CN] Salut, comment ça va ?', 12000, '第一句的译文出现');
+    await until(async () => (await pn.locator('.tr.pending').count()) === 0, 12000, '所有需要翻译的句子都有译文（中文那句不需要，不应一直显示省略号）');
+    // 点 ▶ 跳转
+    await pn.locator('.ln').nth(4).locator('button[aria-label="从这里播放"]').click();
+    await until(async () => { const t = await p.evaluate(() => document.getElementById('v').currentTime); return t >= 9.8 && t < 12.5; }, 4000, '视频跳到第 5 句');
+    await until(async () => /Je vais chez moi/.test((await pn.locator('.ln.cur').first().textContent().catch(() => '')) || ''), 6000, '当前句高亮');
+    // 循环这一句（12.5–14.5）
+    await pn.locator('.ln').nth(5).locator('button[aria-label="循环这一句"]').click();
+    const seen = [];
+    for (let i = 0; i < 14; i++) { seen.push(await p.evaluate(() => document.getElementById('v').currentTime)); await new Promise((r) => setTimeout(r, 500)); }
+    if (seen.some((t) => t < 12.3 || t > 14.8)) throw new Error('循环没有停留在这一句里：' + seen.map((x) => x.toFixed(1)).join(','));
+    if (Math.max(...seen) - Math.min(...seen) < 0.8) throw new Error('循环时视频没有在播放');
+    await pn.locator('.ln').nth(5).locator('button[aria-label="循环这一句"]').click();
+    await pn.screenshot({ path: `${OUT}/ext-7-sidepanel.png` });
+    await pn.close(); await closeExtra();
+  });
+
+  await step('侧边栏：收藏单词（红/黄/绿）与句子（四种颜色）、按颜色筛选、导出、刷新后保留', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true } }));
+    const p = await open(PAGE + '?mode=track');
+    await seek(p, 0.3);
+    const pn = await panelFor(await tabId(':8799/page.html?mode=track'));
+    await until(async () => (await pn.locator('.ln').count()) === 13, 9000, '字幕已载入');
+    const line = pn.locator('.ln', { hasText: 'Je vais chez moi' });
+    await line.locator('.w[data-w="chez"]').click();
+    await until(async () => /\[g:zh-CN\] chez/.test(await pn.locator('#card .tr1').textContent()), 8000, '单词卡里有译文');
+    await pn.locator('#wc-red').click();
+    await until(async () => (await line.locator('.w[data-w="chez"]').getAttribute('class')).includes('c-red'), 3000, '单词变红');
+    // 另一个词标成绿色
+    await line.locator('.w[data-w="merci"]').click();
+    await until(async () => /merci/.test(await pn.locator('#card .w1').textContent()), 3000, '换成 merci 的卡');
+    await pn.locator('#wc-green').click();
+    await until(async () => (await line.locator('.w[data-w="merci"]').getAttribute('class')).includes('c-green'), 3000, '单词变绿');
+    await pn.locator('#card .close').click();
+    // 句子：☆ → 蓝色
+    const sline = pn.locator('.ln', { hasText: 'Bonne nuit à tous' });
+    await sline.locator('button[aria-label="收藏这句"]').click();
+    await sline.locator('.pal .dot.blue').click();
+    await until(async () => (await pn.locator('.ln', { hasText: 'Bonne nuit à tous' }).getAttribute('class')).includes('sc-blue'), 3000, '句子整行变蓝');
+    // 收藏页
+    await pn.locator('[data-tab=saved]').click();
+    eq(await pn.locator('.row[data-id]').count(), 3, '收藏了 3 项');
+    await pn.getByRole('button', { name: '不会', exact: true }).click();
+    eq(await pn.locator('.row[data-id]').count(), 1, '按红色筛选');
+    eq(await pn.locator('.row[data-id] .k').textContent(), 'chez', '红色的是 chez');
+    await pn.getByRole('button', { name: '全部颜色' }).click();
+    const [dl] = await Promise.all([pn.waitForEvent('download'), pn.locator('#export').click()]);
+    const tsv = fs.readFileSync(await dl.path(), 'utf8');
+    if (!/^类型\t原文\t译文/.test(tsv) || !tsv.includes('chez') || !tsv.includes('Bonne nuit à tous') || !/不会/.test(tsv)) throw new Error('导出内容不对：' + tsv.slice(0, 200));
+    await pn.screenshot({ path: `${OUT}/ext-8-saved.png` });
+    // 刷新后保留，颜色仍然显示
+    await pn.reload(); await pn.waitForSelector('.head');
+    await pn.locator('[data-tab=lines]').click(); // 侧边栏记住了上次的标签页（收藏）
+    await until(async () => (await pn.locator('.ln').count()) === 13, 9000, '字幕仍在');
+    eq((await pn.locator('.ln', { hasText: 'Je vais chez moi' }).locator('.w[data-w="chez"]').getAttribute('class')).includes('c-red'), true, '刷新后 chez 仍是红色');
+    eq((await pn.locator('.ln', { hasText: 'Bonne nuit à tous' }).getAttribute('class')).includes('sc-blue'), true, '刷新后句子仍是蓝色');
+    // 删除
+    await pn.locator('[data-tab=saved]').click();
+    await pn.locator('.row[data-id]').first().locator('button[aria-label="删除"]').click();
+    await until(async () => (await pn.locator('.row[data-id]').count()) === 2, 3000, '删除一项');
+    await pn.close(); await closeExtra();
+  });
+
+  await step('侧边栏：同一个视频再看 / 循环播放 / 刷新页面，都直接用已有字幕与译文，不再请求翻译', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true }, pickers: { '127.0.0.1': ['.line'] } }));
+    const p = await open(PAGE + '?mode=dom');
+    await p.evaluate(() => { const v = document.getElementById('v'); v.playbackRate = 2; v.currentTime = 0; v.play(); });
+    const pn = await panelFor(await tabId(':8799/page.html?mode=dom'));
+    await until(async () => (await pn.locator('.ln').count()) >= 13, 25000, '边播边记：13 句都出现在侧边栏');
+    await until(async () => (await pn.locator('.ln .tr').count()) >= 12, 15000, '各句译文都到了');
+    const firstPass = await pn.locator('.ln').count();
+    await p.evaluate(() => document.getElementById('v').pause());
+    await new Promise((r) => setTimeout(r, 1500));
+    const g1 = (last.gtx || []).length;
+    // 循环：回到开头再播一遍
+    await p.evaluate(() => { const v = document.getElementById('v'); v.currentTime = 0.2; v.play(); });
+    await until(async () => (await ov(p))?.t1 === '[g:zh-CN] Salut, comment ça va ?', 2500, '回到开头，第一句的译文马上出现');
+    await new Promise((r) => setTimeout(r, 9000)); // 再播 ~18 秒的内容
+    eq(await pn.locator('.ln').count(), firstPass, '循环播放没有产生重复的句子');
+    eq((last.gtx || []).length, g1, '循环播放期间没有再请求翻译');
+    // 刷新页面：新会话，从保存的转录里直接拿译文
+    await p.reload();
+    await p.evaluate(() => { const v = document.getElementById('v'); v.currentTime = 2.6; v.pause(); });
+    await until(async () => (await ov(p))?.t1 === '[g:zh-CN] Je ne sais pas ce que vous voulez.', 4000, '刷新后译文直接出现');
+    eq((last.gtx || []).length, g1, '刷新页面后也没有再请求翻译');
+    await pn.close(); await closeExtra();
+  });
+
+  await step('侧边栏：没有开启字幕翻译的标签页给出说明；弹窗里有侧边栏入口', async () => {
+    await resetStore();
+    await setSync(baseSettings());
+    const p = await open(PAGE + '?mode=track');
+    const tid = await tabId(':8799/page.html?mode=track');
+    const pn = await panelFor(tid);
+    if (!/还没有字幕/.test(await pn.locator('.empty').textContent())) throw new Error('没有空状态说明');
+    await pn.close();
+    const pop = await ctx.newPage(); watch(pop, 'popup');
+    await pop.goto(`chrome-extension://${id}/popup/popup.html?tabId=${tid}&url=${encodeURIComponent(PAGE)}`);
+    await pop.waitForSelector('#panel');
     await pop.close(); await closeExtra();
   });
 

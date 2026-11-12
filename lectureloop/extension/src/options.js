@@ -6,13 +6,15 @@ import { probeKey } from './core/llm.js';
 import { translateLLM } from './core/llm.js';
 import { translateGtx } from './core/engines.js';
 import { loadSettings } from './core/settings.js';
+import { stats, clearTranscripts } from './core/store.js';
 
 const app = document.getElementById('app');
 let state = { keys: {}, use: '' };
 let msg = null; // { tone, text }
 let busy = false;
+let dbStats = null;
 
-const refresh = async () => { state = await loadKeys(); render(); };
+const refresh = async () => { state = await loadKeys(); dbStats = await stats().catch(() => null); render(); };
 const say = (tone, text) => { msg = { tone, text }; render(); };
 
 async function addKey() {
@@ -94,6 +96,11 @@ function render() {
           h('button', { class: 'btn', disabled: busy, onClick: () => testProvider(id) }, '测试'),
           h('button', { class: 'btn danger', onClick: async () => { await removeKey(id); await refresh(); } }, '删除'));
       }) : h('div', { class: 'muted' }, '还没有。')),
+    h('div', { class: 'card' },
+      h('h2', {}, '本地数据'),
+      h('div', { class: 'muted', id: 'dbstats' }, dbStats ? `已保存 ${dbStats.videos} 个视频的字幕、${dbStats.tm} 条翻译记忆、${dbStats.saved} 个收藏。` : '…'),
+      h('div', { class: 'row', style: 'margin-top:8px' }, h('button', { class: 'btn danger', id: 'clear-tx', onClick: async () => { if (!confirm('清除所有视频的字幕记录和翻译记忆？（不影响收藏的单词和句子）')) return; await clearTranscripts(); dbStats = await stats(); say('ok', '已清除字幕记录与翻译记忆。'); } }, '清除字幕记录与翻译记忆'),
+        h('span', { class: 'tiny muted' }, '这些数据只在这台电脑的浏览器里；有了它们，同一个视频再看一遍不会重复翻译。'))),
     h('div', { class: 'card' },
       h('h2', {}, '免费翻译'),
       h('div', { class: 'row' }, h('button', { class: 'btn', id: 'free', disabled: busy, onClick: testFree }, '测试 Google 免费翻译'), h('span', { class: 'tiny muted' }, '非官方的网页接口，不需要密钥；用得太频繁可能被临时限流。')),

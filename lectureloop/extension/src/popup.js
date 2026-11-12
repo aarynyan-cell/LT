@@ -70,7 +70,7 @@ function statusBox() {
   if (best.source) lines.push(h('div', {}, '✔ 字幕来源：', best.source.label, best.source.lang ? `（${best.source.lang}）` : ''));
   else { tone = 'warn'; lines.push(h('div', {}, '… 还没找到字幕。请先在播放器里打开字幕；没有反应就点“选取字幕位置”。')); }
   const eng = best.provider === 'gtx' ? 'Google 免费翻译' : best.provider?.startsWith('ai:') ? `AI（${PROVIDERS[best.provider.slice(3)]?.name || best.provider}）` : best.provider === 'chrome' ? 'Chrome 内置翻译' : '';
-  if (best.translated || eng) lines.push(h('div', { class: 'tiny muted' }, `已翻译 ${best.translated} 句${eng ? ' · 引擎：' + eng : ''}`));
+  if (best.translated || best.cached || eng) lines.push(h('div', { class: 'tiny muted' }, `已翻译 ${best.translated} 句${best.cached ? `（${best.cached} 句来自本地缓存）` : ''}${eng ? ' · 引擎：' + eng : ''}`));
   if (best.note) { tone = 'warn'; lines.push(h('div', { class: 'tiny' }, best.note)); }
   if (best.error) { tone = 'err'; lines.push(h('div', { class: 'tiny' }, '⚠ ', best.error)); }
   return h('div', { class: 'status ' + tone }, lines);
@@ -110,6 +110,7 @@ function render() {
         h('div', { class: 'grow' }, h('label', { class: 'f', for: 'bg' }, '背景深浅'), h('input', { type: 'range', id: 'bg', min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => setLater({ bg: +e.target.value }) }))),
       h('div', { class: 'row', style: 'margin-top:8px' },
         h('button', { class: 'btn grow', id: 'pick', disabled: !supported(), title: '网站没有被自动识别时：点一下正在显示的字幕文字', onClick: async () => { if (!(await ensureScript())) return render(); await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on: true }).catch(() => {}); chrome.tabs.sendMessage(tab.id, { type: 'pick' }).catch(() => {}); if (!q.get('tabId')) window.close(); } }, '选取字幕位置'),
+        h('button', { class: 'btn grow', id: 'panel', title: '打开字幕侧边栏：整段字幕、收藏单词和句子（Alt+S）', onClick: () => { chrome.sidePanel.open({ tabId: tab.id }).then(() => { if (!q.get('tabId')) window.close(); }).catch(() => {}); } }, '📖 字幕侧边栏'),
         h('button', { class: 'btn grow', id: 'reset', title: '恢复默认位置，并清除这个网站上手动选取的字幕位置', onClick: () => set({ pos: null, pickers: Object.fromEntries(Object.entries(settings.pickers).filter(([k]) => k !== site)) }) }, '重置位置'))),
     h('div', { class: 'sec' },
       sel('eng', { auto: '自动（有 AI 密钥用 AI，否则用 Google 免费）', llm: '只用 AI 密钥', gtx: '只用 Google 免费翻译', chrome: '只用 Chrome 内置翻译' }, settings.engine, (v) => set({ engine: v }), '翻译引擎'),

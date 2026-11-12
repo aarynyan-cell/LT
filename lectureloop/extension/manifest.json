@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "LectureLoop 字幕翻译",
   "short_name": "字幕翻译",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "看网页视频时实时翻译字幕：法语 / 英语 / 中文互译。支持 YouTube、Netflix 等站点的字幕、视频字幕轨道，以及手动选取字幕位置。",
   "minimum_chrome_version": "116",
   "icons": {
@@ -23,6 +23,9 @@
     "page": "options/options.html",
     "open_in_tab": true
   },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
   "background": {
     "service_worker": "dist/background.js"
   },
@@ -41,7 +44,9 @@
   "permissions": [
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "sidePanel",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://api.anthropic.com/*",
@@ -70,6 +75,12 @@
         "default": "Alt+T"
       },
       "description": "开 / 关当前标签页的字幕翻译"
+    },
+    "panel": {
+      "suggested_key": {
+        "default": "Alt+S"
+      },
+      "description": "打开字幕侧边栏"
     }
   }
 }

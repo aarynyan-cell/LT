@@ -13,6 +13,11 @@ import { askAnthropicRaw, translateLLM, probeKey } from '../../extension/src/cor
 import { normalize, DEFAULTS, siteOf } from '../../extension/src/core/settings.js';
 import { loadKeys, saveKey, removeKey, selection } from '../../extension/src/core/keys.js';
 import { Controller } from '../../extension/src/core/controller.js';
+import { findMatch, mergeLines, norm } from '../../extension/src/core/transcript.js';
+import { Recorder } from '../../extension/src/core/recorder.js';
+import { videoKeyOf } from '../../extension/src/core/videokey.js';
+import { tokenize, wordKey, wordStats, isStop } from '../../extension/src/core/words.js';
+import { translateWithTM, tmKey } from '../../extension/src/core/tm.js';
 import { subtitleTask } from '../public/js/lib/ai-tasks.js';
 import { bundle, manifest, packageFiles, zipFiles } from '../tools/build-ext.mjs';
 
@@ -297,6 +302,141 @@ test('Controller._lineInfo：显式语言 / 轨道语言提示 / 逐句判断 / 
   assert.deepEqual(c._lineInfo("I don't know what you want."), { source: 'fr', targets: ['zh'] });
 });
 
+// ---------- 转录记录 / 侧边栏数据 ----------
+const L = (id, start, end, text, tr) => ({ id, start, end, text, ...(tr ? { tr } : {}) });
+
+test('norm / findMatch：忽略大小写和标点，时间相近才算同一句', () => {
+  assert.equal(norm("  Je ne SAIS pas,  vraiment ! "), 'je ne sais pas vraiment');
+  const lines = [L('a', 10, 12, 'Merci.'), L('b', 50, 52, 'Merci !'), L('c', 20, 22, 'Autre chose')];
+  assert.equal(findMatch(lines, 'merci', 11), 0);
+  assert.equal(findMatch(lines, 'merci', 51), 1, '同样的词在别处出现是另一句');
+  assert.equal(findMatch(lines, 'Merci', 30), -1, '相差太远不算同一句');
+  assert.equal(findMatch(lines, '', 0), -1);
+});
+
+test('mergeLines：同 id / 同文同时间合并（译文、结束时间），不同文字另起一行，按时间排序', () => {
+  const a = mergeLines([], [L('t2000', 2, 4, 'Deux'), L('t0', 0, 2, 'Un')]);
+  assert.deepEqual(a.map((l) => l.id), ['t0', 't2000']);
+  const b = mergeLines(a, [L('t0', 0, 2.5, 'Un', { zh: '一' }), L('d9', 2.2, 4.4, 'deux!', { zh: '二' })]); // 同一句（标点/大小写不同，时间相近）
+  assert.equal(b.length, 2);
+  assert.deepEqual(b[0].tr, { zh: '一' }); assert.equal(b[0].end, 2.5);
+  assert.deepEqual(b[1].tr, { zh: '二' }); assert.equal(b[1].end, 4.4);
+  const c = mergeLines(b, [L('t0', 0, 2, 'Complètement différent')]); // 同 id 不同内容：新的一行（id 不冲突）
+  assert.equal(c.length, 3); assert.equal(new Set(c.map((l) => l.id)).size, 3);
+  assert.ok(!('tr' in mergeLines([], [L('a', 0, 1, 'x')])[0]) || mergeLines([], [L('a', 0, 1, 'x')])[0].tr === undefined);
+});
+
+test('mergeLines：上千句的轨道载入足够快', () => {
+  const big = Array.from({ length: 2000 }, (_, i) => L(`t${i * 3000}`, i * 3, i * 3 + 2, `Phrase numéro ${i} avec quelques mots`));
+  const t0 = Date.now();
+  const m = mergeLines(mergeLines([], big), big);
+  assert.equal(m.length, 2000);
+  assert.ok(Date.now() - t0 < 1500, `合并 2000 句耗时 ${Date.now() - t0}ms`);
+});
+
+test('Recorder：轨道整条载入；DOM 字幕边播边记；循环播放认出已有的句子；译文补给同文句子', () => {
+  const r = new Recorder();
+  r.reset({ key: 'k' });
+  r.loadAll([{ start: 0, end: 2, text: 'Salut' }, { start: 2.5, end: 4, text: 'Ça va ?' }, { start: 5, end: 6, text: 'Salut' }], 'fr');
+  assert.equal(r.lines.length, 3);
+  assert.deepEqual(r.take().map((l) => l.id), ['t0', 't2500', 't5000']);
+  assert.equal(r.hasDirty, false);
+  r.loadAll([{ start: 0, end: 2, text: 'Salut' }, { start: 2.5, end: 4, text: 'Ça va ?' }, { start: 5, end: 6, text: 'Salut' }], 'fr'); // 同一条轨道再载入：没有变化
+  assert.equal(r.hasDirty, false);
+  r.attach('salut', { zh: '你好' });
+  assert.deepEqual(r.lines.filter((l) => l.tr).map((l) => l.id), ['t0', 't5000'], '同文的两句都补上译文');
+  assert.equal(r.idAt(3), 't2500');
+  assert.deepEqual(r.missing(['zh']).map((l) => l.id), ['t2500']);
+
+  const d = new Recorder();
+  d.reset({ key: 'dom' });
+  const id1 = d.observe('Where are you going?', 10, 'en');
+  d.touch(id1, 12);
+  const id2 = d.observe('I need to leave.', 13, 'en');
+  assert.notEqual(id1, id2);
+  assert.equal(d.lines.length, 2);
+  assert.equal(d.lines[0].end, 12);
+  // 循环：视频回到开头再播一遍 → 同一句、相近时间，复用已有 id，不新增
+  assert.equal(d.observe('Where are you going?', 10.4, 'en'), id1);
+  assert.equal(d.lines.length, 2);
+  // 重新打开页面：从保存的转录载入
+  const e = new Recorder();
+  e.reset({ key: 'dom' }); e.load(JSON.parse(JSON.stringify(d.take())));
+  assert.equal(e.hasDirty, false);
+  assert.equal(e.observe('where are you going', 9.8, 'en'), id1);
+  assert.equal(e.lines.length, 2);
+});
+
+test('Recorder：滚动字幕（新句子以上一句开头）延长上一句而不是另记一行', () => {
+  const r = new Recorder();
+  r.reset({ key: 'roll' });
+  const a = r.observe('Where are you', 5, 'en');
+  const b = r.observe('Where are you going tonight', 5.8, 'en');
+  assert.equal(a, b); assert.equal(r.lines.length, 1);
+  assert.equal(r.lines[0].text, 'Where are you going tonight');
+  const c = r.observe('Something else entirely', 9, 'en');
+  assert.notEqual(c, a);
+});
+
+test('videoKeyOf：同一个视频同一个 key（忽略时间/列表参数），不同视频不同', () => {
+  const k = (href) => videoKeyOf({ href, hostname: new URL(href).hostname, pathname: new URL(href).pathname, search: '' });
+  assert.equal(k('https://www.youtube.com/watch?v=abc12345678&t=30s&list=PL1').key, 'yt:abc12345678');
+  assert.equal(k('https://www.youtube.com/watch?v=abc12345678').key, 'yt:abc12345678');
+  assert.equal(k('https://www.youtube.com/embed/abc12345678').key, 'yt:abc12345678');
+  assert.equal(k('https://www.youtube.com/shorts/abc12345678').key, 'yt:abc12345678');
+  assert.equal(k('https://www.netflix.com/watch/81234567?trackId=1').key, 'nf:81234567');
+  assert.equal(k('https://example.com/video/12/?utm_source=x&start=30').key, 'u:example.com/video/12');
+  assert.notEqual(k('https://example.com/video/12').key, k('https://example.com/video/13').key);
+  assert.equal(k('https://example.com/p?b=2&a=1').key, k('https://example.com/p?a=1&b=2').key);
+  assert.equal(k('https://www.youtube.com/watch?v=abc12345678').url, 'https://www.youtube.com/watch?v=abc12345678');
+});
+
+test('words：法语省音词不拆开，中文用分词，停用词与统计', () => {
+  const t = tokenize("L'immeuble n'est pas là, c'est vrai.", 'fr').filter((x) => x.word).map((x) => x.t);
+  assert.deepEqual(t, ["L'immeuble", "n'est", 'pas', 'là', "c'est", 'vrai']);
+  const zh = tokenize('我不知道你想要什么', 'zh').filter((x) => x.word).map((x) => x.t);
+  assert.ok(zh.length >= 3 && zh.join('') === '我不知道你想要什么', '中文被分成多个词：' + zh);
+  assert.equal(wordKey("  L'Immeuble "), "l'immeuble");
+  assert.equal(isStop('le', 'fr'), true); assert.equal(isStop('menace', 'fr'), false); assert.equal(isStop('1', 'fr'), true);
+  const st = wordStats([L('a', 0, 1, 'Le pompier saute. Le pompier regarde.'), L('b', 1, 2, 'Il saute encore')], 'fr');
+  assert.deepEqual(st.slice(0, 2).map((x) => [x.word, x.count]), [['pompier', 2], ['saute', 2]]);
+  assert.ok(!st.some((x) => x.word === 'le'), '停用词被隐藏');
+  assert.ok(wordStats([L('a', 0, 1, 'Le pompier')], 'fr', { hideStop: false }).some((x) => x.word === 'le'));
+});
+
+test('translateWithTM：命中记忆的句子不请求翻译；未命中的才翻译并写回；免费翻译质量的条目在用 AI 时重翻', async () => {
+  const mem = new Map();
+  const calls = [];
+  const deps = (wantAI, provider = 'gtx') => ({
+    getMany: async (keys) => new Map(keys.filter((k) => mem.has(k)).map((k) => [k, mem.get(k)])),
+    putMany: async (es) => es.forEach((e) => mem.set(e.k, e)),
+    run: async (r) => { calls.push(r.items.map((i) => i.t)); return { provider, results: Object.fromEntries(r.targets.map((t) => [t, r.items.map((i) => ({ i: i.i, t: `${t}:${i.t}` }))])) }; },
+    wantAI,
+  });
+  const req = (texts) => ({ source: 'fr', targets: ['zh'], items: texts.map((t, i) => ({ i, t })), engine: 'auto' });
+  const r1 = await translateWithTM(req(['Salut', 'Merci']), deps(false));
+  assert.equal(r1.provider, 'gtx'); assert.deepEqual(calls, [['Salut', 'Merci']]);
+  assert.ok(mem.has(tmKey('fr', 'zh', 'Salut')));
+  const r2 = await translateWithTM(req(['Merci', 'Nouveau', 'Salut']), deps(false));
+  assert.deepEqual(calls.at(-1), ['Nouveau'], '只翻译没见过的');
+  assert.deepEqual(r2.results.zh, [{ i: 0, t: 'zh:Merci' }, { i: 1, t: 'zh:Nouveau' }, { i: 2, t: 'zh:Salut' }], '结果按原顺序对齐');
+  assert.equal(r2.cached, 2);
+  const n = calls.length;
+  const r3 = await translateWithTM(req(['Merci', 'Salut']), deps(false));
+  assert.equal(calls.length, n, '全部命中：没有请求');
+  assert.equal(r3.provider, 'cache');
+  const r4 = await translateWithTM(req(['Merci']), deps(true, 'ai:anthropic'));
+  assert.deepEqual(calls.at(-1), ['Merci'], '用 AI 时不接受免费翻译质量的记忆');
+  assert.equal(mem.get(tmKey('fr', 'zh', 'Merci')).p, 'ai');
+  const m2 = calls.length;
+  await translateWithTM(req(['Merci']), deps(true, 'ai:anthropic'));
+  assert.equal(calls.length, m2, 'AI 质量的记忆可以复用');
+  // 记忆写失败不影响结果
+  const bad = { ...deps(false), putMany: async () => { throw new Error('quota'); } };
+  const r5 = await translateWithTM(req(['Zzz']), bad);
+  assert.deepEqual(r5.results.zh, [{ i: 0, t: 'zh:Zzz' }]);
+});
+
 // ---------- 构建产物 ----------
 test('构建产物是最新的（dist / manifest.json 与源码一致；改了源码请运行 npm run build:ext）', async () => {
   const out = await bundle({ write: false });
@@ -311,9 +451,11 @@ test('构建产物是最新的（dist / manifest.json 与源码一致；改了�
 test('manifest：MV3、权限最小、快捷键、主机权限覆盖各服务商', () => {
   const m = manifest();
   assert.equal(m.manifest_version, 3);
-  assert.deepEqual(m.permissions, ['storage', 'activeTab', 'scripting']);
+  assert.deepEqual(m.permissions, ['storage', 'activeTab', 'scripting', 'sidePanel', 'unlimitedStorage']);
+  assert.equal(m.side_panel.default_path, 'sidepanel/sidepanel.html');
+  assert.equal(m.commands.panel.suggested_key.default, 'Alt+S');
   assert.ok(m.host_permissions.includes('https://api.anthropic.com/*') && m.host_permissions.includes('https://translate.googleapis.com/*'));
   assert.equal(m.commands.toggle.suggested_key.default, 'Alt+T');
   assert.equal(m.content_scripts[0].all_frames, true);
-  for (const f of [m.background.service_worker, m.action.default_popup, m.options_ui.page, ...m.content_scripts[0].js, ...Object.values(m.icons)]) assert.ok(existsSync(resolve(EXT, f)), `manifest 引用的 ${f} 不存在`);
+  for (const f of [m.background.service_worker, m.action.default_popup, m.options_ui.page, m.side_panel.default_path, ...m.content_scripts[0].js, ...Object.values(m.icons)]) assert.ok(existsSync(resolve(EXT, f)), `manifest 引用的 ${f} 不存在`);
 });

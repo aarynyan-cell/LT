@@ -137,11 +137,13 @@ lectureloop/
 ```
 lectureloop/extension/              Chrome 字幕翻译插件（可直接"加载已解压的扩展程序"）
 ├─ manifest.json                    由 tools/build-ext.mjs 生成（MV3；host_permissions 来自服务商表）
-├─ README.md ui.css icons/ popup/ options/
+├─ README.md ui.css icons/ popup/ options/ sidepanel/
 ├─ src/                             源码（ES 模块）
 │  ├─ content.js  background.js  popup.js  options.js  dom.js
+│  ├─ sidepanel.js  侧边栏页面（字幕 / 单词 / 收藏）
 │  └─ core/  langs · stabilizer · settings · sources · translator · overlay · picker · controller   （页面内）
-│            engines · llm · keys                                                                    （后台；密钥只在这里）
+│            transcript · recorder · videokey · words                                                （纯逻辑：转录合并、记录器、视频 key、分词）
+│            engines · llm · keys · tm · store                                                       （后台与扩展页面；密钥只在后台；store = IndexedDB）
 └─ dist/                            esbuild 产物（不压缩，已提交）；public/downloads/lectureloop-subtitles.zip 是它的打包
 ```
 
@@ -400,6 +402,7 @@ Manifest V3
 ├─ background service worker                           翻译请求的唯一出口：engines.translateBatch（密钥只在这里）
 │    chrome.commands（Alt+T）· storage.session（各框架状态）· storage.local 限制为 TRUSTED_CONTEXTS
 ├─ action popup / options page                         设置、状态、密钥管理（页面脚本，直接用 chrome.* 与共享模块）
+├─ side panel（sidepanel/，manifest `side_panel`）      字幕侧边栏：直接读写 IndexedDB，经 tabs.sendMessage 控制视频页
 └─ 不需要 side panel / offscreen / tabCapture（那是"无字幕视频"的第二阶段，见 10.4）
 ```
 
@@ -416,6 +419,20 @@ Manifest V3
 | `langs.js` | `detectLang`：CJK 占比 / 法英停用词与变音符号 / 法语省音（l' d' j'…）打分；平局返回 null |
 | `settings.js` | 默认值 + `normalize()`（任何存储内容都能读成合法设置）+ `siteOf()`（iframe 里取最顶层页面主机名） |
 
+**v0.2 新增：转录、记忆、侧边栏**
+
+| 模块 | 职责 |
+|---|---|
+| `transcript.js` | 纯函数。`norm`（忽略大小写/标点）、`findMatch`（文字相同 + 开始时间相差 ≤ 3 s）、`mergeLines`（按 id 或模糊匹配合并，合并译文、扩展结束时间，按时间排序；**字幕轨道的行（id 以 `t` 开头）只按 id 合并**，否则相邻的两句"Non. Non."会被并成一句；预先算好归一化文字，2000 句 < 1.5 s） |
+| `recorder.js` | `Recorder`：`loadAll`（轨道整条载入）、`observe`（网站字幕稳定后记一句，循环时复用已有 id；新句子以上一句开头则延长上一句）、`touch`、`attach`（译文补给所有同文句子）、`take`（取走变化的行）、`missing`、`idAt` |
+| `videokey.js` | 视频身份：YouTube（`v` / embed / shorts / live）、Netflix（`/watch/<id>`）、其他（域名 + 路径 + 去掉 `utm_* t start time list index…` 并排序的查询串） |
+| `words.js` | `tokenize`（`Intl.Segmenter`，中文也能分词；法语省音词合并回一个词）、`wordKey`、`isStop`/`wordStats`（停用词来自 `langs.js`）、颜色表 |
+| `tm.js` | `translateWithTM`：先查翻译记忆，未命中的交给引擎并写回；`wantAI` 时"免费翻译质量"的条目视为未命中；写失败不影响结果；结果按原顺序对齐并带 `cached` 命中数 |
+| `store.js` | IndexedDB `lectureloop-subs`：`videos` / `tm`（索引 ts，超 4 万条删最旧 8 千）/ `saved`；`upsertVideo` 在**一个事务**里读 → 合并 → 写；`stats` / `clearTranscripts` |
+| `sidepanel.js` | 三个标签页；字幕行只在数据变化时重建，播放中只切换 `.cur`（`markCurrent`）；点词 → `translate` 消息（带这句话作上下文）→ 单词卡；`paintWord` 只更新这个词的颜色；偏好存 `localStorage` |
+
+**控制器的接入点**：`_checkVideo()` 每个 tick 计算视频 key，变了就换一份转录并经 `tx-get` 读出已保存的（`_seedFromLines()` 把有译文的句子放进翻译队列的缓存）；`_loadTrack()` 在轨道整条载入时 `loadAll`；`_record()` 在每句稳定后记录并拿到 `curLineId`（状态上报，侧边栏据此高亮）；`_flushSoon()` 每 2 s 把变化的行经 `tx-upsert` 发给后台；`seek` / `setLoop`（rAF）/ `translateAll` 响应侧边栏的指令。
+
 **后台模块**：`engines.js`（`translateGtx`：每句一个请求、最多 4 并发；`translateBatch`：auto = llm → gtx，带降级说明 `note`）· `llm.js`（Anthropic 原生 `fetch` 非流式 + 逐级降级；其它走共享的 `askJsonOpenAI`；`probeKey` 识别并验证密钥）· `keys.js`（`chrome.storage.local` 的多服务商密钥，`selection()` 优先用快速模型）。
 
 **消息协议**
@@ -426,6 +443,9 @@ Manifest V3
 | `status` | 内容 → 后台 | 写入 `storage.session['st:<tab>:<frame>']`；`on:false` 时删除 |
 | `setEnabled` / `pick` / `pickCancel` / `ping` | 弹窗/后台 → 内容 | 开关、进入/退出选取模式、探活 |
 | `pickDone` | 内容 → 后台 | 选取结束，后台通知同一标签页的其他框架退出选取模式 |
+| `tx-get` / `tx-upsert` | 内容 → 后台 | 读取 / 合并保存某个视频的转录（内容脚本不能直接用扩展的数据库）；写完后台广播 `tx-updated`，侧边栏据此刷新 |
+| `seek` / `loop` / `loopClear` / `translateAll` | 侧边栏 → 内容 | 跳转、循环一句、取消循环、翻译全部；**只有有视频的那个框架回复** |
+| `translate`（扩展） | 内容/侧边栏 → 后台 | 现在经 `translateWithTM`：先查翻译记忆；结果里多了 `cached` |
 
 **构建与发布**：`npm run build:ext` → esbuild（IIFE，不压缩）打包 4 个入口到 `extension/dist/`，从服务商表生成 `manifest.json`（`host_permissions`），再用内置的最小 ZIP 写入器（固定时间戳，内容不变字节不变）打成 `public/downloads/lectureloop-subtitles.zip`；设置页提供下载。产物与 zip 都提交，**测试会检查它们没有过期**。
 
@@ -433,8 +453,8 @@ Manifest V3
 
 | 层 | 内容 |
 |---|---|
-| `node:test`（`tests/ext.test.mjs`） | 语言判断；稳定器（假定时器）；队列（合并/去重/缓存/失败重试/bg 暂停/提升）；`translateGtx`；Anthropic 降级链；`translateLLM` 两条路径；`translateBatch` 降级与说明；`probeKey`；设置归一化；`siteOf`；密钥存取；`Controller._lineInfo`；**构建产物与 zip 是否最新**；manifest 引用的文件都存在 |
-| Playwright（`tests/e2e/extension.cjs`） | 用 `launchPersistentContext` 加载未打包的扩展；本地测试页（`ext-server.cjs`：60 秒静音 WAV + 由字幕表生成的 WebVTT + 仿制的 YouTube / Netflix / 自定义字幕层）+ 模拟翻译服务（`mock-api.mjs`）。用 `--host-resolver-rules` 把 `www.youtube.com` / `www.netflix.com` 映射到本机，让站点适配真正匹配。覆盖：字幕轨道自动开启与预翻译、中文句不翻译、隐藏网站字幕与恢复、YouTube/Netflix 结构、弹窗开关与手动选取并记住、设置页保存密钥→选模型→测试→改用 AI、AI 失败降级、限流提示、悬浮层字号/拖动/刷新保持/关闭、全屏挂载、不支持的页面、删除密钥、**内容脚本读不到密钥** |
+| `node:test`（`tests/ext.test.mjs`） | **转录合并 / 记录器（轨道载入、DOM 边播边记、循环复用、滚动字幕）/ 视频 key / 分词与词频 / 翻译记忆（命中、写回、AI 质量重翻、写失败）**；语言判断；稳定器（假定时器）；队列（合并/去重/缓存/失败重试/bg 暂停/提升）；`translateGtx`；Anthropic 降级链；`translateLLM` 两条路径；`translateBatch` 降级与说明；`probeKey`；设置归一化；`siteOf`；密钥存取；`Controller._lineInfo`；**构建产物与 zip 是否最新**；manifest 引用的文件都存在 |
+| Playwright（`tests/e2e/extension.cjs`） | 用 `launchPersistentContext` 加载未打包的扩展；本地测试页（`ext-server.cjs`：60 秒静音 WAV + 由字幕表生成的 WebVTT + 仿制的 YouTube / Netflix / 自定义字幕层）+ 模拟翻译服务（`mock-api.mjs`）。用 `--host-resolver-rules` 把 `www.youtube.com` / `www.netflix.com` 映射到本机，让站点适配真正匹配。覆盖：**侧边栏**（整条轨道一次性列出、译文逐步出现、点句跳转、当前句高亮、循环一句、单词卡与红/黄/绿、句子四色、按颜色筛选、导出 TSV、刷新后保留、删除、**循环/刷新后零翻译请求**、空状态）、**设置页清除按钮**；字幕轨道自动开启与预翻译、中文句不翻译、隐藏网站字幕与恢复、YouTube/Netflix 结构、弹窗开关与手动选取并记住、设置页保存密钥→选模型→测试→改用 AI、AI 失败降级、限流提示、悬浮层字号/拖动/刷新保持/关闭、全屏挂载、不支持的页面、删除密钥、**内容脚本读不到密钥** |
 | **未覆盖** | 真实的 Netflix / YouTube / Prime / 哔哩哔哩（开发环境访问不了）；真实的非 Anthropic 服务商；Chrome 内置 Translator 的真实模型；Alt+T 快捷键（浏览器级，Playwright 无法触发） |
 
 ### 10.3 已知局限与设计取舍
@@ -444,6 +464,9 @@ Manifest V3
 - 播放器把 `<video>` 元素本身设为全屏时，悬浮层没法挂入（浏览器规则）。
 - 轮询（150 ms）换来对站点内部实现零依赖；代价是后台标签页里定时器被降频（看视频时标签页是前台，不受影响）。
 - 站点选择器会随网站改版失效——这是"手动选取"和"字幕轨道"两条路存在的原因。
+- 网站 DOM 字幕只能边播边记：第一遍播放时侧边栏随播放增长，第二遍起完整；YouTube 自动字幕的滚动文本做了"以上一句开头就延长"的去重，仍可能有重复句。
+- 已保存的译文不随引擎升级（之后填了 AI 密钥，旧视频仍显示旧译文）；设置页可清除。翻译记忆会对"免费翻译质量"条目在用 AI 时重翻。
+- `chrome.sidePanel.open` 需要用户手势，Playwright 无法点真实的工具栏按钮，所以端到端测试把侧边栏页面当普通标签页打开（`?tabId=`）；真实侧边栏的打开与跟随标签页切换没有自动化覆盖。
 
 ### 10.4 第二阶段（未做）：无字幕视频的音频识别
 

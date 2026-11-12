@@ -69,8 +69,9 @@ async function main() {
     throw new Error(r?.error?.message || '翻译失败');
   }
 
+  const rpc = (type, payload) => rt.sendMessage({ type, ...payload });
   const ctl = new Controller({
-    site, settings, send, report,
+    site, settings, send, report, rpc,
     saveSettings: (p) => saveSettings(p),
   });
   const setOn = (on) => { on ? ctl.start() : ctl.stop(); if (!on) report({ on: false }); };
@@ -83,6 +84,11 @@ async function main() {
   rt.onMessage.addListener((msg, _sender, reply) => {
     if (msg?.type === 'setEnabled') setOn(!!msg.on);
     else if (msg?.type === 'ping') reply({ on: ctl.on, site, top: isTop });
+    // 侧边栏的指令：只有"有视频的那个框架"才回复（多个框架时第一个回复的算数）
+    else if (msg?.type === 'seek') { if (ctl.seek(msg.t, msg.play)) reply({ ok: true }); }
+    else if (msg?.type === 'loop') { if (ctl.setLoop(msg.start, msg.end)) reply({ ok: true }); }
+    else if (msg?.type === 'loopClear') { ctl.clearLoop(); }
+    else if (msg?.type === 'translateAll') { if (ctl.on && ctl.rec.lines.length) reply({ n: ctl.translateAll() }); }
     else if (msg?.type === 'pick') {
       if (!shouldPick()) return;
       if (!ctl.on) ctl.start();

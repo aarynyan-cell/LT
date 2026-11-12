@@ -1,5 +1,7 @@
 // 内容脚本的总控：轮询字幕 → 稳定化 → 翻译 → 悬浮层显示；并负责隐藏网站字幕、预翻译、状态上报。
-import { buildSources, readFirst } from './sources.js';
+import { buildSources, readFirst, seekTo, pickVideo } from './sources.js';
+import { Recorder } from './recorder.js';
+import { videoKeyOf } from './videokey.js';
 import { Stabilizer } from './stabilizer.js';
 import { TranslateQueue } from './translator.js';
 import { Overlay } from './overlay.js';
@@ -13,13 +15,16 @@ export class Controller {
    * @param o.send       (req) => Promise<result>   翻译请求（发给 background，或在页面里用 Chrome 内置翻译）
    * @param o.saveSettings (patch) => void           悬浮层里的操作要写回设置
    * @param o.report     (status) => void            把状态报告给弹窗
+   * @param o.rpc        (type, payload) => Promise  向后台读写转录（tx-get / tx-upsert）
    */
-  constructor({ doc = globalThis.document, site, settings, send, saveSettings, report = () => {}, timers = undefined }) {
-    this.doc = doc; this.site = site; this.settings = settings; this.saveSettings = saveSettings; this.report = report;
-    this.on = false; this.cur = ''; this.src = null; this.lastSeen = 0; this.error = ''; this.note = ''; this.recent = [];
+  constructor({ doc = globalThis.document, site, settings, send, saveSettings, report = () => {}, rpc = async () => ({}), timers = undefined }) {
+    this.doc = doc; this.site = site; this.settings = settings; this.saveSettings = saveSettings; this.report = report; this.rpc = rpc;
+    this.rec = new Recorder(); this.vk = null; this.ready = false; this.curLineId = ''; this.flushTimer = 0; this.loop = null;
+    this.cachedHits = 0; this.on = false; this.cur = ''; this.src = null; this.lastSeen = 0; this.error = ''; this.note = ''; this.recent = [];
     this.queue = new TranslateQueue({
       send, onError: (e) => { this.error = e.message || '翻译失败'; this._render(); },
-      onOk: (r) => { this.error = ''; this.note = r?.note || ''; this.provider = r?.provider || this.provider; },
+      onOk: (r) => { this.error = ''; this.note = r?.note || ''; if (r?.provider && r.provider !== 'cache') this.provider = r.provider; this.cachedHits += r?.cached || 0; },
+      onResult: ({ text, tr }) => { this.rec.attach(text, tr); this._flushSoon(); },
     });
     this.stab = new Stabilizer({ onSettle: (t) => this._translate(t), ...(timers ? { timers } : {}) });
     this.overlay = null; this.styleEl = null; this.sources = null;
@@ -39,6 +44,9 @@ export class Controller {
     if (!this.on) return;
     this.on = false;
     clearInterval(this.timer); clearInterval(this.pf);
+    this.clearLoop();
+    this._flush();
+    this.vk = null; this.ready = false;
     this.stab.clear();
     this.sources?.textTrack.restore();
     this.styleEl?.remove(); this.styleEl = null;
@@ -55,6 +63,7 @@ export class Controller {
     if (srcChanged) { this.sources?.textTrack.restore(); this._rebuild(); this.prefetched.clear(); }
     this.overlay.setOptions(this._ov());
     if (prev.targets.join() !== s.targets.join() || prev.source !== s.source || prev.engine !== s.engine) { this.queue.clear(); if (this.cur) this._translate(this.cur); }
+    if (prev.targets.join() !== s.targets.join()) this._seedFromLines();
     this._render();
   }
 
@@ -96,8 +105,9 @@ export class Controller {
 
   _tick() {
     if (!this.on || this.doc.hidden) return;
+    this._checkVideo();
     const found = readFirst(this.sources);
-    if (found) { this.src = found; this.lastSeen = Date.now(); }
+    if (found) { this.src = found; this.lastSeen = Date.now(); this.curVideo = found.video || this.curVideo; }
     else if (Date.now() - this.lastSeen > 8000) this.src = null;
     this.overlay.setAnchor(found?.video || this.src?.video || null);
     this.overlay.layout();
@@ -105,12 +115,14 @@ export class Controller {
     // 相邻两句之间网站常常会把字幕清空一瞬间：空白持续超过 250ms 才真正隐藏，避免闪烁
     if (!raw && this.cur) { this.emptySince ||= Date.now(); if (Date.now() - this.emptySince < 250) { this._status(); return; } } else this.emptySince = 0;
     const text = this.stab.push(raw, found?.rolling);
-    if (text !== this.cur) { this.cur = text; this._render(); }
+    if (text !== this.cur) { this.cur = text; this.curLineId = ''; this._render(); }
+    if (this.ready) { this._loadTrack(); if (this.curLineId) this.rec.touch(this.curLineId, this._now()); }
     this._status();
   }
 
   _translate(text) {
     if (!text) return;
+    this._record(text);
     const { source, targets } = this._lineInfo(text);
     if (!targets.length) return;
     this.queue.translate(text, { source, targets, context: this.recent.slice(-3), prio: 'live' }).then(() => { if (this.cur === text) this._render(); });
@@ -140,12 +152,104 @@ export class Controller {
     }
   }
 
+  // ---------- 转录记录 ----------
+  _now() { const v = this.curVideo?.isConnected ? this.curVideo : pickVideo(this.doc); return v ? v.currentTime : 0; }
+
+  /** 视频换了（地址变化：YouTube 自动播放下一个、Netflix 换集）→ 换一份转录，并读出之前保存的 */
+  _checkVideo() {
+    const loc = this.doc.defaultView?.location;
+    if (!loc) return;
+    const k = videoKeyOf(loc);
+    if (this.vk?.key === k.key) return;
+    this.vk = { ...k, title: (this.doc.title || '').trim() };
+    this.ready = false; this.curLineId = ''; this.recent = [];
+    this.rec.reset(this.vk);
+    const key = k.key;
+    this.rpc('tx-get', { key }).then((r) => {
+      if (this.vk?.key !== key) return; // 读的过程中视频又换了
+      if (r?.video?.lines?.length) { this.rec.load(r.video.lines); this._seedFromLines(); }
+      this.ready = true;
+    }).catch(() => { this.ready = true; });
+  }
+
+  /** 已保存的转录里有译文的句子，直接放进翻译缓存：同一个视频再看 / 循环播放时立即显示，不用请求 */
+  _seedFromLines() {
+    for (const l of this.rec.lines) {
+      const { source, targets } = this._lineInfo(l.text);
+      if (!targets.length || !targets.every((t) => l.tr?.[t])) continue;
+      this.queue.seed(l.text, source, targets, Object.fromEntries(targets.map((t) => [t, l.tr[t]])));
+    }
+    this._render();
+  }
+
+  /** 字幕轨道整条载入：一次性把全部句子放进转录（侧边栏立刻能看到整部剧） */
+  _loadTrack() {
+    const all = this.sources?.textTrack.allCues?.();
+    if (!all || all.sig === this.rec.loadedTrack) return;
+    this.rec.loadedTrack = all.sig;
+    this.rec.loadAll(all.cues, all.lang);
+    this._seedFromLines();
+    this._flushSoon();
+  }
+
+  /** 一句稳定下来：记进转录，并记下它的 id（侧边栏据此高亮当前句） */
+  _record(text) {
+    if (!this.vk) return;
+    const lang = this.src?.lang || this._lineInfo(text).source;
+    this.curLineId = this.rec.observe(text, Math.max(0, this._now() - 0.15), lang);
+    this._flushSoon();
+  }
+
+  _flushSoon() { if (!this.flushTimer) this.flushTimer = setTimeout(() => this._flush(), 2000); }
+  _flush() {
+    clearTimeout(this.flushTimer); this.flushTimer = 0;
+    if (!this.vk || !this.rec.hasDirty) return;
+    const lines = this.rec.take();
+    const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || '').trim() || this.vk.title, lang: this.src?.lang || lines[0]?.lang || null };
+    this.rpc('tx-upsert', { video: meta, lines }).catch(() => {});
+  }
+
+  // ---------- 侧边栏的指令 ----------
+  seek(t, play) { return seekTo(this.doc, t, play); }
+  /** 循环播放 [start,end]：用 requestAnimationFrame 盯着播放位置（timeupdate 一秒才 4 次，会冲过头） */
+  setLoop(start, end) {
+    this.clearLoop();
+    const v = pickVideo(this.doc);
+    if (!v) return false;
+    const s = Math.max(0, start), e = Math.max(end, s + 1.5);
+    this.loop = { s, e, raf: 0 };
+    const win = this.doc.defaultView;
+    const step = () => {
+      if (!this.loop) return;
+      if (v.currentTime >= e - 0.03 || v.currentTime < s - 0.6) { v.currentTime = s; if (v.paused) v.play?.().catch(() => {}); }
+      this.loop.raf = win.requestAnimationFrame(step);
+    };
+    v.currentTime = s; v.play?.().catch(() => {});
+    step();
+    return true;
+  }
+  clearLoop() { if (this.loop) { this.doc.defaultView?.cancelAnimationFrame(this.loop.raf); this.loop = null; } }
+
+  /** 把转录里还没有译文的句子全部排进翻译队列（低优先级，不挡当前这句）。返回排了多少句 */
+  translateAll() {
+    let n = 0;
+    const lines = this.rec.lines;
+    lines.forEach((l, i) => {
+      const { source, targets } = this._lineInfo(l.text);
+      if (!targets.length || targets.every((t) => l.tr?.[t])) return;
+      n++;
+      this.queue.translate(l.text, { source, targets, context: lines[i - 1] ? [lines[i - 1].text] : [], prio: 'bg' });
+    });
+    return n;
+  }
+
   _status() {
     const s = {
       on: this.on, site: this.site,
       source: this.src ? { id: this.src.id, label: this.src.label, lang: this.src.lang } : null,
-      translated: this.queue.stats.ok, failed: this.queue.stats.failed,
+      translated: this.queue.stats.ok, failed: this.queue.stats.failed, cached: this.cachedHits,
       error: this.error, note: this.note, provider: this.provider || '',
+      video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null,
     };
     const j = JSON.stringify(s);
     if (j !== this.lastStatus) { this.lastStatus = j; this.report(s); }

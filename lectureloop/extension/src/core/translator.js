@@ -4,7 +4,8 @@
 //  · 失败不缓存（下次同一句还会重试），并通知调用方显示错误。
 export class TranslateQueue {
   /** send({source,targets,items:[{i,t}],context}) → Promise<{provider?,note?,results:{zh:[{i,t}]}}> */
-  constructor({ send, maxBatch = 8, bgBatch = 12, cap = 3000, onError, onOk, now = () => Date.now() }) {
+  constructor({ send, maxBatch = 8, bgBatch = 12, cap = 3000, onError, onOk, onResult, now = () => Date.now() }) {
+    this.onResult = onResult || (() => {});
     this.send = send; this.maxBatch = maxBatch; this.bgBatch = bgBatch; this.cap = cap;
     this.onError = onError || (() => {}); this.onOk = onOk || (() => {});
     this.now = now;
@@ -18,6 +19,8 @@ export class TranslateQueue {
   key(text, source, targets) { return `${source}|${[...targets].sort().join(',')}|${text}`; }
   peek(text, source, targets) { return this.cache.get(this.key(text, source, targets)); }
   clear() { this.cache.clear(); }
+  /** 直接放入一条已知的译文（来自已保存的转录）：这句再出现时立即命中，不请求翻译 */
+  seed(text, source, targets, tr) { this._store(this.key(text, source, targets), tr); }
 
   /** → Promise<{[target]: string}>；失败时得到 {} */
   translate(text, { source = 'auto', targets, context = [], prio = 'live' }) {
@@ -72,7 +75,7 @@ export class TranslateQueue {
       for (const [target, arr] of Object.entries(r?.results || {})) for (const { i, t } of arr || []) if (per[i] && t) per[i][target] = t;
       batch.forEach((e, n) => {
         const out = per[n];
-        if (Object.keys(out).length) { this._store(e.key, out); this.stats.ok++; }
+        if (Object.keys(out).length) { this._store(e.key, out); this.stats.ok++; this.onResult({ text: e.text, source: e.source, targets: e.targets, tr: out }); }
         this.pendingByKey.delete(e.key);
         e.resolve(out);
       });
