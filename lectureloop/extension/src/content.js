@@ -75,7 +75,8 @@ async function main() {
   });
   const setOn = (on) => { on ? ctl.start() : ctl.stop(); if (!on) report({ on: false }); };
 
-  watchSettings((s) => { settings = s; ctl.setSettings(s); if (s.sites[site] && !ctl.on) ctl.start(); });
+  // 只在"此网站自动开启"从关变成开的那一刻启动；用户点了悬浮层的 ✕ 之后，改别的设置不应该把它又打开
+  watchSettings((s) => { const was = !!settings.sites[site]; settings = s; ctl.setSettings(s); if (!was && s.sites[site] && !ctl.on) ctl.start(); });
   if (settings.sites[site]) ctl.start();
 
   const shouldPick = () => !!pickVideo(document) || (isTop && !document.querySelector('iframe'));

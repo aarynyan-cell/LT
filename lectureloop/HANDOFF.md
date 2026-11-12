@@ -1,5 +1,10 @@
 # 交接说明（云端 → 本地继续）
 
+> ## 2026-11-12 更新（以下"已上线"一节之后又发生了什么）
+> - **文档已补全**：`docs/01-PRD.md`（v0.2）、`02-product-design.md`、`03-frontend-plan.md` 已写入后台录制、悬浮字幕、朗读语音、多服务商密钥、同源中继、连续讲课快速断句、字幕回看、课程库编辑，以及新的 **Chrome 字幕翻译插件**。
+> - **新增 `lectureloop/extension/`**（Chrome 字幕翻译插件）：见其 `README.md`。构建 `npm run build:ext`；测试 `npm test`（含构建产物是否过期）与 `node tests/e2e/extension.cjs`（真实 Chromium 加载扩展）。**没有在真实的 Netflix / YouTube 等站点验证过**。
+> - 下方 11-04 那段"已上线但没有验证过的部分"里：第 4 条（文档）已完成；其余仍然成立。
+>
 > ## 状态更新：已上线（未做完整测试）
 > 应用户要求，本分支已**在没有完成全部测试的情况下**合并到 `main` 并自动部署到 <https://lt.multape.workers.dev/>。
 > 上线前只做了：单元测试（31 个，通过）、`wrangler deploy --dry-run`（通过）、敏感信息扫描（无）。

@@ -234,6 +234,18 @@
     saveSettings(patch);
     render();
   };
+  var pending = {};
+  var timer = 0;
+  var setLater = (patch) => {
+    settings = { ...settings, ...patch };
+    pending = { ...pending, ...patch };
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const p = pending;
+      pending = {};
+      saveSettings(p);
+    }, 250);
+  };
   function statusBox() {
     const best = statuses.filter((s) => s.on).sort((a, b) => (b.source ? 1 : 0) - (a.source ? 1 : 0))[0];
     if (!supported()) return h("div", { class: "status warn" }, "\u8FD9\u4E2A\u9875\u9762\u4E0D\u652F\u6301\uFF08\u6D4F\u89C8\u5668\u5185\u90E8\u9875\u9762\u6216\u5E94\u7528\u5546\u5E97\u9875\u9762\u65E0\u6CD5\u4F7F\u7528\u6269\u5C55\uFF09\u3002");
@@ -310,8 +322,8 @@
         h(
           "div",
           { class: "row" },
-          h("div", { class: "grow" }, h("label", { class: "f", for: "fs" }, "\u5B57\u53F7"), h("input", { type: "range", id: "fs", min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => set({ fontScale: +e.target.value }) })),
-          h("div", { class: "grow" }, h("label", { class: "f", for: "bg" }, "\u80CC\u666F\u6DF1\u6D45"), h("input", { type: "range", id: "bg", min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => set({ bg: +e.target.value }) }))
+          h("div", { class: "grow" }, h("label", { class: "f", for: "fs" }, "\u5B57\u53F7"), h("input", { type: "range", id: "fs", min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => setLater({ fontScale: +e.target.value }) })),
+          h("div", { class: "grow" }, h("label", { class: "f", for: "bg" }, "\u80CC\u666F\u6DF1\u6D45"), h("input", { type: "range", id: "bg", min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => setLater({ bg: +e.target.value }) }))
         ),
         h(
           "div",

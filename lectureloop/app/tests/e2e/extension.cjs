@@ -164,6 +164,8 @@ const MOCK = 'http://127.0.0.1:8788';
     await until(async () => (await ov(p))?.t1?.startsWith('[g:en]'), 9000, '改成英语后重新翻译');
     await pop.locator('#t2').selectOption('zh');
     await until(async () => { const o = await ov(p); return o?.t1?.startsWith('[g:en]') && o?.t2?.startsWith('[g:zh-CN]'); }, 9000, '两种译文同时显示');
+    await pop.locator('#fs').fill('1.7');
+    await until(async () => +(await getSync()).fontScale === 1.7, 3000, '拖动滑块后设置被保存（合并写入）');
     await pop.locator('#always').check();
     await until(async () => (await getSync()).sites?.['127.0.0.1'] === true, 3000, '“此网站总是开启”写入设置');
     await pop.locator('#reset').click();
@@ -243,6 +245,9 @@ const MOCK = 'http://127.0.0.1:8788';
     // 关闭按钮
     await p.evaluate(() => document.querySelector('lectureloop-subtitles').shadowRoot.querySelector('[data-k=off]').click());
     await until(async () => (await ov(p)) === null, 3000, '点 ✕ 后悬浮层移除');
+    await setSync({ fontScale: 1.3 });
+    await p.waitForTimeout(700);
+    eq(await ov(p), null, '点 ✕ 后改别的设置，不应该又自动打开');
     await closeExtra();
   });
 

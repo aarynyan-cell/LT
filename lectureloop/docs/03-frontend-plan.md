@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 |---|---|
-| 版本 | v0.1，对应 [PRD](./01-PRD.md) 与 [产品设计](./02-product-design.md) |
-| 现状 | `app/` 目录为按本方案实现的 MVP，可 `npm start` 本地运行 |
+| 版本 | v0.2（2026-11-12），对应 [PRD v0.2](./01-PRD.md) 与 [产品设计 v0.2](./02-product-design.md) |
+| 现状 | `app/` 为按本方案实现的 Web 应用（已部署在 Cloudflare Workers，也可 `npm start` 本地运行）；`extension/` 为 Chrome 字幕翻译插件（§10）。两者共用 `app/public/js/lib/` 里的提示词、服务商表与 OpenAI 兼容客户端 |
 | 主线 | **零构建、本地优先、领域逻辑与 UI 解耦**，为"V1 迁移 React+TS / V2 浏览器插件"留好接口 |
 
 ---
@@ -87,15 +87,18 @@ lectureloop/
 ├─ README.md
 ├─ docs/                          PRD / 设计 / 前端方案
 └─ app/
-   ├─ package.json                依赖仅 @anthropic-ai/sdk；scripts: start / dev / test / mock
-   ├─ server.js                   入口：静态托管 + API 路由
+   ├─ package.json                依赖 @anthropic-ai/sdk（devDependency：esbuild）；scripts: start / dev / test / mock / build:sdk / build:ext
+   ├─ server.js                   入口：静态托管 + API 路由 + /relay
    ├─ server/
    │  ├─ env.js                   轻量 .env 加载
    │  ├─ claude.js                SDK 封装：结构化输出/流式/拒答/降级
    │  ├─ ai.js                    notes / language 任务：提示词 + JSON Schema + 校验
    │  └─ translate.js             Provider 链：Google → Claude
-   ├─ tools/mock-api.mjs          本地模拟 Claude + Google（无密钥开发）
-   ├─ tests/                      domain.test.mjs（node:test）、e2e.mjs（Playwright，可选）
+   ├─ worker/                     Cloudflare Worker：index.js（静态资源 + /relay）、relay.js（同源中继，主机白名单）
+   ├─ tools/mock-api.mjs          本地模拟 Claude（流式/非流式）+ Google v2 + OpenAI 兼容 + 免费 gtx（无密钥开发与测试）
+   ├─ tools/build-sdk.mjs         把官方 SDK 打包成浏览器可 import 的单文件
+   ├─ tools/build-ext.mjs         构建插件：esbuild 打包 → extension/dist、生成 manifest、打 zip（public/downloads/）
+   ├─ tests/                      domain.test.mjs · ext.test.mjs（node:test）；e2e/*.cjs（Playwright：回归、后台录制、悬浮字幕、识别、语音、课程库编辑、插件）
    └─ public/
       ├─ index.html
       ├─ css/app.css              设计令牌 + 组件样式
@@ -115,11 +118,31 @@ lectureloop/
          │  ├─ diff.js            词级 diff（听写评分）
          │  ├─ srs.js             Leitner 调度
          │  ├─ player.js          三引擎播放器（Audio / TTS / Clock）
-         │  ├─ asr.js             Web Speech + MediaRecorder + 演示课堂
+         │  ├─ asr.js             Web Speech + MediaRecorder + 演示课堂；接入话语跟踪器，识别日志
+         │  ├─ utterance.js       话语跟踪器（纯逻辑）：丢字修复、时间校正、稳定前缀提前提交
+         │  ├─ live.js            全局实时听课控制器（单例）+ useLive；翻译队列；Wake Lock；草稿
+         │  ├─ parts.js           片段编辑纯函数：重命名 / 并入上段 / 从某句拆分 / 不变量校验
+         │  ├─ voices.js          朗读语音分档与挑选（排除新奇语音）
+         │  ├─ providers.js       服务商表 + 密钥格式识别 + 默认模型挑选（Web 应用与插件共用）
+         │  ├─ llm-openai.js      OpenAI 兼容客户端（json_schema / json_object 降级；插件共用）
+         │  ├─ llm-client.js      浏览器端统一 AI 客户端（Anthropic SDK 打包版 + OpenAI 兼容 + 中继）
+         │  ├─ byok.js            自带密钥（多服务商，localStorage）
+         │  ├─ ai-tasks.js        提示词 / Schema / 校验（服务端、浏览器、插件三处共用；含 translateTask 与 subtitleTask）
          │  ├─ api.js             后端客户端（含浏览器内置 Translator 降级）
          │  └─ seed.js            示例课程
-         ├─ components/           ui.js timeline.js transcript.js playerbar.js importer.js
+         ├─ components/           ui.js timeline.js transcript.js playerbar.js importer.js dialogs.js（课程/课时/片段编辑对话框）floating.js（悬浮字幕 + 桌面 PiP）
          └─ views/                home live library course lesson notes language clips drill vocab settings
+```
+
+```
+lectureloop/extension/              Chrome 字幕翻译插件（可直接"加载已解压的扩展程序"）
+├─ manifest.json                    由 tools/build-ext.mjs 生成（MV3；host_permissions 来自服务商表）
+├─ README.md ui.css icons/ popup/ options/
+├─ src/                             源码（ES 模块）
+│  ├─ content.js  background.js  popup.js  options.js  dom.js
+│  └─ core/  langs · stabilizer · settings · sources · translator · overlay · picker · controller   （页面内）
+│            engines · llm · keys                                                                    （后台；密钥只在这里）
+└─ dist/                            esbuild 产物（不压缩，已提交）；public/downloads/lectureloop-subtitles.zip 是它的打包
 ```
 
 ---
@@ -243,23 +266,35 @@ interface Engine {
 
 **高亮**：Transcript 订阅 `cue` 事件，**直接对 DOM 加/去 class 并 `scrollIntoView({block:'center'})`**，不触发组件重渲染。
 
-### 7.4 Live 管线
+### 7.4 Live 管线（v0.2）
 
 ```
-getUserMedia ─┬─▶ MediaRecorder（dataavailable 每 5s 累积 chunks）   t0 = recorder.start 时刻
+getUserMedia ─┬─▶ MediaRecorder（累积 chunks）                         t0 = recorder.start 时刻
               └─▶ SpeechRecognition(lang, continuous, interim)
-                     │ onresult: interim → 更新舞台；final → 生成 Cue
+                     │ onresult → items[{text, final}] ─▶ UtteranceTracker.feed(items, t)
                      ▼
-        Cue{ start = max(0, utterStartMs - t0), end = nowMs - t0 }   // utterStart = 本句第一次 interim 的时间
+   UtteranceTracker（纯逻辑，可用模拟事件测试）
+     · 记录当前"假设"pending：全文 / 开始 / 最后更新 / 已提前提交的词数 off
+     · 新临时结果不是对旧假设的修订 → 先保存旧的（解决"被下一句直接覆盖"丢字）
+     · 稳定前缀提交：假设仍在增长时，剩余词数 ≥ 16（中文 ≥ 32 字）或停留 ≥ 6 s，
+       就把"除最后 3 词（中文 6 字）以外"提交成一句，优先在 and/so/but/because/okay… 之前切；之后用 off 跳过已提交前缀
+     · flush（识别结束 / 暂停 / 停止）保存当前假设
+     · 保存时校正时间：结束 = max(最后更新, 定稿到达 - 1.2 s)；语速 < 1.2 词/s 说明开始时间陈旧→推迟；> 6 词/s 说明结束过早
+     · provisional 句子被随后高度相似的定稿替换，避免重复
                      ▼
-        translateQueue（debounce 800ms 批量，带前 3 句上下文）→ cue.tr[lang] 异步回填
-  onend（浏览器自动停止）→ 若会话仍在进行则 300ms 后重启
-  stuck(Space)  → clip{ start = cues[-2].start, end = now, kind:'stuck', source:'live' }
-  stop → 组装 Lesson（真实时间轴）+ Blob + clips，自动分 Part，写库
+   onFinal(cue{start,end,text}) ─▶ live.js 的全局 state.lines ─▶ pending 队列 ─▶ pump()
+   pump()：同一时刻只有一个翻译请求在途（保证顺序）；在途期间新来的句子合并成下一批；上下文 = 前 3 句
+   onend（浏览器自动停止）→ 若会话仍在进行则**立即**重启（不用定时器：后台标签的定时器会被降频）
+   stuck(Space / 悬浮层🚩) → marks.push({t})；归档时转成 clip
+   stop → drain()（等最后一批译文，最多 3 s）→ 组装 Lesson（真实时间轴）+ Blob + clips，自动分 Part，写库，清草稿
 ```
 
-- **演示课堂**：`DemoSource` 以 `setInterval` 逐词吐出示例 Cue（模拟 interim → final），与真实源共用同一管线，便于测试。
-- 草稿每 30 秒写入 `kv:liveDraft`（cues + clips，不含音频块则只保存文本）。
+- **全局单例**：`live.js` 持有会话、字幕与翻译队列；页面（上课页、悬浮字幕、顶部录音条）只订阅状态（`useLive(selector)`，选择器返回值变化才重渲染，避免逐词刷新整页）。
+- **保持运行**：visibility 回来时重新申请 Wake Lock；`beforeunload` 提示 + 落草稿；每 30 s 写 `kv:liveDraft`；页面标题显示 `● 时间`。
+- **字幕舞台**：渲染全部行（`content-visibility:auto`），`.stage` 记录"是否贴底"（`stick`）：贴底时新行到来自动滚动，`onScroll` 离开底部 > 阈值则 `stick=false` 并累计 `leftAt` 之后的新行数，显示"↓ 回到最新（N 条新字幕）"。
+- **悬浮字幕**（`components/floating.js`）：页内块只在 `phase≠idle && settings.float.on` 时渲染；`setPointerCapture` 只在空白处启动（排除 `button,input,label,select`，否则会吞掉按钮的 click）；`ResizeObserver` 记住大小。**桌面窗口**用 `documentPictureInPicture.requestWindow`，复制同源样式表，把 Preact 树渲染进新窗口，`pagehide` 时清理；录音结束时自动关闭。
+- **演示课堂**：`DemoSource` 以定时器逐词吐出示例 Cue（模拟 interim → final），与真实源共用同一管线，便于测试。
+- **识别日志**：`asr.js` 记录每个原始事件（interim/final/restart/error），设置页可导出，用来对照"屏幕上看到的"与"引擎给过的"。
 
 ### 7.5 后端接口契约
 
@@ -309,7 +344,8 @@ getUserMedia ─┬─▶ MediaRecorder（dataavailable 每 5s 累积 chunks） 
 | 能力 | 首选 | 次选 | 兜底 |
 |---|---|---|---|
 | 实时识别 | Web Speech | （V1）云 ASR | 演示课堂 / 导入 |
-| 译文 | Google | Claude | 浏览器内置 Translator → 不翻译 |
+| 译文（课堂） | Google | Claude / 用户自带密钥的任一服务商 | 浏览器内置 Translator → 不翻译 |
+| 译文（插件·视频字幕） | 用户 AI 密钥（快速模型） | Google 免费网页接口 | Chrome 内置 Translator（语言包就绪时）→ 只显示原文 + 红点 |
 | 笔记 | Claude 结构化输出 | — | 离线抽取式摘要（标注"离线粗略版"） |
 | 词汇/句式 | Claude | — | 离线 n-gram 候选 + 话语标记正则 |
 | 纠错 | Claude + 课程术语表 | — | 内置 ML/统计"常被听错"起始词表 + 用户术语表 |
@@ -345,22 +381,83 @@ getUserMedia ─┬─▶ MediaRecorder（dataavailable 每 5s 累积 chunks） 
 | `speechSynthesis` | ✔ | ✔ | ✔ | 语音包因系统而异 |
 | `DecompressionStream` | ✔ | ✔(16.4+) | ✔(113+) | docx 解析依赖；不支持则提示改用 txt |
 | 浏览器内置 Translator | ✔(新版) | ✘ | ✘ | 实验性降级 |
+| Document Picture-in-Picture | ✔(116+) | ✘ | ✘ | 悬浮字幕"弹出到桌面"；不支持时隐藏该按钮 |
+| Wake Lock | ✔ | ✔(16.4+) | ✔(126+) | 录音期间保持屏幕常亮，失败则忽略 |
+| 字幕翻译插件 | ✔(MV3, 116+) | ✘ | ✘ | 仅 Chromium 内核 |
 
 ---
 
-## 10. 浏览器插件演进（V2）
+## 10. 浏览器插件
+
+### 10.1 已实现：Chrome 字幕翻译插件（`extension/`，v0.1）
+
+**定位**：读取网页里**已有的字幕** → 翻译 → 悬浮显示。不做音频识别，不依赖 Web 应用的数据（IndexedDB）。
 
 ```
-Manifest V3 (WXT)
-├─ side_panel         复用本应用 UI（同一 bundle，路由改为 memory/hash）
-├─ offscreen document 持有 MediaStream：chrome.tabCapture.getMediaStreamId → 捕获标签页音频
-│                     → AudioWorklet 重采样 16k PCM → WebSocket → 云 ASR（经后端签发临时凭证）
-├─ content script     在会议/录播页面叠加字幕条（可选）；监听 <video> 时间
-├─ service worker     消息路由、alarms（SRS 到期通知）
-└─ storage            IndexedDB 在插件源下独立；提供与 Web 版互导 JSON
+Manifest V3
+├─ content script（<all_urls>，全帧，document_idle）   默认休眠：只监听消息与设置；开启后才创建 Controller
+│    Controller：每 150 ms 轮询 → readFirst(sources) → Stabilizer → TranslateQueue → Overlay
+├─ background service worker                           翻译请求的唯一出口：engines.translateBatch（密钥只在这里）
+│    chrome.commands（Alt+T）· storage.session（各框架状态）· storage.local 限制为 TRUSTED_CONTEXTS
+├─ action popup / options page                         设置、状态、密钥管理（页面脚本，直接用 chrome.* 与共享模块）
+└─ 不需要 side panel / offscreen / tabCapture（那是"无字幕视频"的第二阶段，见 10.4）
 ```
 
-可直接复用：`lib/domain/*`、`store`、`db`、全部视图。需新增：`AsrProvider` 云实现、`TabCaptureSource`、消息通道。
+**内容脚本模块（`src/core/`）**
+
+| 模块 | 职责 |
+|---|---|
+| `sources.js` | 字幕来源。`buildSources(doc, settings, site)` 返回按优先级排列的候选：手动选取 > 已知站点（YouTube/Netflix/Prime/哔哩哔哩）> TextTrack。每个候选有 `read()`：返回 `{text, lang, video, rolling}`。`leafText()` 把叶子节点的文字用空格拼起来（Netflix 两行是并排 span）；`pickVideo()` 选面积最大且在播放的 `<video>`；TextTrack 来源还提供 `upcoming()`（预翻译）与 `restore()`（把被我们改成 hidden 的轨道恢复） |
+| `stabilizer.js` | 整句出现 90 ms 后触发翻译；增长中（新文本以旧文本开头 / 共享前缀 ≥ 60%，或来源标记 `rolling`）等 550 ms；相同文本不重复触发 |
+| `translator.js` | `TranslateQueue`：缓存（上限 3000）+ 去重 + 批量合并；**live 与 bg 两个独立的在途名额**；bg 句子被当前播放用到时提升为 live；失败不缓存，bg 失败暂停 10 s |
+| `controller.js` | 总控。`_lineInfo(text)` 决定这一句的 `{source, targets}`：用户指定则用之；自动时中文靠文字判断，其它优先用来源语言（轨道 srclang），再用逐句判断；自动模式下检测到已是目标语言的不翻译。空白 > 250 ms 才隐藏悬浮层；设置变化时只在必要时重建来源/清缓存 |
+| `overlay.js` | Shadow DOM 悬浮层：stage 跟随视频矩形，box 用百分比定位（中心 x、底边 y）；`width:max-content` 使宽度不随位置变化；`mount()` 在 `fullscreenchange` 时挂到全屏元素；全部文本用 `textContent` |
+| `picker.js` | 选取器：全屏透明盾 + `elementFromPoint`；`selectorFor()` 从点击元素向外最多 4 层找"稳定类名/id 且匹配 1–4 个元素"的选择器（类名只接受字母和连字符，排除 `css-xxx` 这类构建哈希） |
+| `langs.js` | `detectLang`：CJK 占比 / 法英停用词与变音符号 / 法语省音（l' d' j'…）打分；平局返回 null |
+| `settings.js` | 默认值 + `normalize()`（任何存储内容都能读成合法设置）+ `siteOf()`（iframe 里取最顶层页面主机名） |
+
+**后台模块**：`engines.js`（`translateGtx`：每句一个请求、最多 4 并发；`translateBatch`：auto = llm → gtx，带降级说明 `note`）· `llm.js`（Anthropic 原生 `fetch` 非流式 + 逐级降级；其它走共享的 `askJsonOpenAI`；`probeKey` 识别并验证密钥）· `keys.js`（`chrome.storage.local` 的多服务商密钥，`selection()` 优先用快速模型）。
+
+**消息协议**
+
+| 消息 | 方向 | 内容 |
+|---|---|---|
+| `translate` | 内容 → 后台 | `{source, targets, items:[{i,t}], context, engine}` → `{ok, result:{provider, results:{lang:[{i,t}]}, note?}}` 或 `{ok:false, error:{code,message}}` |
+| `status` | 内容 → 后台 | 写入 `storage.session['st:<tab>:<frame>']`；`on:false` 时删除 |
+| `setEnabled` / `pick` / `pickCancel` / `ping` | 弹窗/后台 → 内容 | 开关、进入/退出选取模式、探活 |
+| `pickDone` | 内容 → 后台 | 选取结束，后台通知同一标签页的其他框架退出选取模式 |
+
+**构建与发布**：`npm run build:ext` → esbuild（IIFE，不压缩）打包 4 个入口到 `extension/dist/`，从服务商表生成 `manifest.json`（`host_permissions`），再用内置的最小 ZIP 写入器（固定时间戳，内容不变字节不变）打成 `public/downloads/lectureloop-subtitles.zip`；设置页提供下载。产物与 zip 都提交，**测试会检查它们没有过期**。
+
+### 10.2 测试
+
+| 层 | 内容 |
+|---|---|
+| `node:test`（`tests/ext.test.mjs`） | 语言判断；稳定器（假定时器）；队列（合并/去重/缓存/失败重试/bg 暂停/提升）；`translateGtx`；Anthropic 降级链；`translateLLM` 两条路径；`translateBatch` 降级与说明；`probeKey`；设置归一化；`siteOf`；密钥存取；`Controller._lineInfo`；**构建产物与 zip 是否最新**；manifest 引用的文件都存在 |
+| Playwright（`tests/e2e/extension.cjs`） | 用 `launchPersistentContext` 加载未打包的扩展；本地测试页（`ext-server.cjs`：60 秒静音 WAV + 由字幕表生成的 WebVTT + 仿制的 YouTube / Netflix / 自定义字幕层）+ 模拟翻译服务（`mock-api.mjs`）。用 `--host-resolver-rules` 把 `www.youtube.com` / `www.netflix.com` 映射到本机，让站点适配真正匹配。覆盖：字幕轨道自动开启与预翻译、中文句不翻译、隐藏网站字幕与恢复、YouTube/Netflix 结构、弹窗开关与手动选取并记住、设置页保存密钥→选模型→测试→改用 AI、AI 失败降级、限流提示、悬浮层字号/拖动/刷新保持/关闭、全屏挂载、不支持的页面、删除密钥、**内容脚本读不到密钥** |
+| **未覆盖** | 真实的 Netflix / YouTube / Prime / 哔哩哔哩（开发环境访问不了）；真实的非 Anthropic 服务商；Chrome 内置 Translator 的真实模型；Alt+T 快捷键（浏览器级，Playwright 无法触发） |
+
+### 10.3 已知局限与设计取舍
+
+- 只读已有字幕：没有字幕的视频不支持。DOM 字幕无法提前翻译，AI 引擎下译文晚 1–2 s；字幕轨道整条载入时可提前翻译 90 s。
+- YouTube 自动字幕滚动增长，靠稳定器等待，译文会慢约半秒。
+- 播放器把 `<video>` 元素本身设为全屏时，悬浮层没法挂入（浏览器规则）。
+- 轮询（150 ms）换来对站点内部实现零依赖；代价是后台标签页里定时器被降频（看视频时标签页是前台，不受影响）。
+- 站点选择器会随网站改版失效——这是"手动选取"和"字幕轨道"两条路存在的原因。
+
+### 10.4 第二阶段（未做）：无字幕视频的音频识别
+
+```
+offscreen document：chrome.tabCapture.getMediaStreamId → getUserMedia(chromeMediaSource:'tab')
+   → AudioWorklet 重采样 16 kHz PCM → 云 ASR（Deepgram / Azure，经用户自带密钥）或 Chrome 本机识别
+   → 句子（复用 Web 应用的 UtteranceTracker）→ 现有的 TranslateQueue / Overlay
+```
+
+可直接复用：`utterance.js`（稳定前缀提交）、翻译队列、悬浮层、引擎降级。需新增：`TabCaptureSource`、ASR Provider、`tabCapture` 权限与 offscreen document。**在确认需求（PRD 开放问题 6）前不做。**
+
+### 10.5 与 Web 应用的关系（第三阶段设想）
+
+把插件里的句子"收进课程库"：插件向 Web 应用（同源页面）发消息，或导出 JSON 由 Web 应用导入，生成一个"看剧"课时（Cue 带 `start/end`，来自 TextTrack 时间）。需要先定数据格式；暂不做。
 
 ---
 
@@ -368,9 +465,10 @@ Manifest V3 (WXT)
 
 | 层 | 工具 | 覆盖 |
 |---|---|---|
-| 领域 | `node:test` | 断句、合并/拆分、时间轴估算与锚点插值、docx 解析、纠错应用/撤销、diff、SRS、话语标记 |
+| 领域 | `node:test` | 断句、合并/拆分、时间轴估算与锚点插值、docx 解析、纠错应用/撤销、diff、SRS、话语标记；**话语跟踪器**（丢字、时间校正、连续讲课提前提交、中文判定）；**片段编辑**（重命名/并入/拆分/不变量）；朗读语音分档；AI 任务（提示词/校验） |
 | 服务端 | `node:test` + mock | 参数校验、JSON 解析、拒答/截断处理、翻译对齐校验 |
-| E2E | Playwright | 导入 docx → Studio 播放/循环 → 标记 → 训练 → 演示课堂 → 归档 |
+| E2E | Playwright | 导入 docx → Studio 播放/循环 → 标记 → 训练 → 演示课堂 → 归档；**后台录制**（页面隐藏/切页）；**悬浮字幕**（拖动/缩放/锁定/PiP）；**识别事件脚本**（伪造 `SpeechRecognition`，验证丢字与时间）；**连续讲课**（首句延迟、译文同步、归档文本一致）；**字幕回看**；**课程库编辑**（改名/换学期/移动/批量/片段拆分并入/刷新保持）；**插件**（见 §10.2） |
+| 注意 | — | 测试里的失败有时是测试脚本问题（选择器过宽、未点同意弹窗、Playwright `bringToFront` 不会让页面变 hidden），先判断再改代码 |
 | 手工清单 | 产品设计 §8 | — |
 
 ---
@@ -382,6 +480,8 @@ Manifest V3 (WXT)
 - **输入限制**：请求体上限 8 MB；`cues` 数量/字符数上限；简单速率限制。
 - **XSS**：htm 默认转义文本；高亮用节点拼装而非 `innerHTML`。
 - **隐私**：只向外发送文本；音频不出设备；设置页明示识别服务（Web Speech）可能由浏览器厂商处理语音。
+- **自带密钥（在线版）**：多服务商密钥只存 `localStorage`，不进 IndexedDB、不进备份；只发往用户选的服务商；浏览器跨域被拦截时走同源 `/relay`——Origin 校验、**主机白名单**（`custom` 不在内，防止被当开放代理）、只转发必要请求头、不记录密钥；CSP `connect-src` 列出各服务商来源。
+- **插件**：默认休眠；只有字幕文字外发；密钥在 `storage.local` 且 `TRUSTED_CONTEXTS`（内容脚本读取被拒绝，已有端到端测试）；悬浮层与选取器在 Shadow DOM 中，页面文本一律 `textContent`；权限最小（`storage` + 明列的 API 域名 + localhost）；`<all_urls>` 内容脚本是为了在任意视频站读字幕，已在说明文档中解释。
 
 ---
 
@@ -389,9 +489,9 @@ Manifest V3 (WXT)
 
 | 阶段 | 前端动作 |
 |---|---|
-| **MVP（本仓库）** | Preact+htm 无构建；全部 P0 功能 |
+| **MVP / v0.2（本仓库）** | Preact+htm 无构建；全部 P0 功能 + 后台录制、悬浮字幕、课程库编辑、多服务商密钥；`extension/` 字幕翻译插件（esbuild 打包，不压缩） |
 | **V1** | Vite + React + TS；`lib/` 加类型；波形（Web Audio）；云 ASR Provider；Worker 化导入；Playwright CI |
-| **V2** | WXT 插件；账号与同步层（在 `db.js` 前加 Repository 抽象）；PWA 离线 |
+| **V2** | 插件第二阶段（标签页音频识别，§10.4）与 Web 应用打通（§10.5）；账号与同步层（在 `db.js` 前加 Repository 抽象）；PWA 离线 |
 
 
 ---
@@ -400,13 +500,14 @@ Manifest V3 (WXT)
 
 | 关注点 | 做法 |
 |---|---|
-| 部署 | Cloudflare Workers & Pages 的 Git 集成（支持私有仓库、免费）：根目录 `wrangler.jsonc` 声明纯静态资源目录 `lectureloop/app/public`，部署命令 `npx wrangler deploy`，无构建步骤（旧式 Pages 项目则填输出目录）；`.github/workflows/test.yml` 只负责推送时跑单元测试 |
-| 安全头 | `public/_headers`：CSP（`connect-src 'self' https://api.anthropic.com`）、`Permissions-Policy: microphone=(self)` 等，与本地服务一致 |
+| 部署 | **Cloudflare Workers**（Git 集成，`main` 分支推送即部署；支持私有仓库、免费）：根目录 `wrangler.jsonc` 声明 `main: lectureloop/app/worker/index.js`（静态资源 + 只对 `/relay` 先执行的 Worker），部署命令 `npx wrangler deploy`，无构建步骤（站点名保持 `lt`）。插件 zip 作为静态资源 `downloads/lectureloop-subtitles.zip` 一并发布；`.github/workflows/test.yml` 只负责推送时跑单元测试 |
+| 安全头 | `public/_headers`：CSP（`connect-src` 列出各服务商来源，由 `providers.js` 的 `cspOrigins()` 生成）、`Permissions-Policy: microphone=(self)` 等，与本地服务一致 |
 | 子路径 | 所有静态资源与 API 均用**相对路径**（`css/app.css`、`js/main.js`、`api/config`），根路径或 `/LT/` 这类子路径都能部署 |
 | 模式判断 | 启动时请求 `api/config`：返回带 `version` 的配置 = 本地版；404 或被托管平台回退成 `index.html`（Cloudflare 的 SPA 行为，状态 200）= 在线静态版（`config.server=false`） |
-| AI 路由 | `lib/api.js`：本地服务端密钥 → 浏览器自带密钥（`lib/claude-browser.js`）→ 离线启发式 |
+| AI 路由 | `lib/api.js`：本地服务端密钥 → 浏览器自带密钥（`lib/llm-client.js`，按"笔记/词汇"与"实时翻译"各自选中的服务商）→ 离线启发式 |
 | 共享逻辑 | `lib/ai-tasks.js` 同时被 `server/ai.js` 与浏览器端引用：提示词、JSON Schema、结果校验（防幻觉、索引裁剪）两端完全一致 |
 | SDK | 官方 `@anthropic-ai/sdk` 经 esbuild 打包为 `vendor/anthropic-sdk.mjs`（约 360KB），仅在使用浏览器密钥时动态加载；`dangerouslyAllowBrowser: true` 仅用于用户本人的密钥 |
-| 密钥存储 | `lib/byok.js` → `localStorage`；不进 IndexedDB、不进备份；设置页提供保存 / 测试连接 / 清除 |
+| 密钥存储 | `lib/byok.js` → `localStorage`（多服务商结构，旧版单个 Claude 密钥自动迁移）；不进 IndexedDB、不进备份；设置页提供一个框自动识别 / 验证 / 选模型 / 测试 / 删除 |
+| 同源中继 | `worker/relay.js`（Worker 与 Node 服务共用）：对 CORS 情况未知的服务商先直连，网络层失败再走 `/relay`；Origin 校验、主机白名单、只转发必要头 |
 | 本地 CSP | `connect-src 'self' https://api.anthropic.com`，本地版也可使用浏览器密钥 |
 | 一键运行 | `start-mac.command` / `start-windows.bat` / `start.sh`：检查 Node ≥ 20 → 首次 `npm install --omit=dev` → `node server.js --open`；端口被占用时若已是 LectureLoop 则直接打开（浏览器数据按端口隔离，避免"课程消失"） |

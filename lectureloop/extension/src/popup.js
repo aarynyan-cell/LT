@@ -33,6 +33,14 @@ async function setEnabled(on) {
   setTimeout(async () => { await readStatus(); render(); }, 400);
 }
 const set = (patch) => { settings = { ...settings, ...patch }; saveSettings(patch); render(); };
+// 滑块拖动时每秒会触发几十次 input：chrome.storage.sync 每分钟最多写 120 次，超了会失败并读回旧值，所以合并后延迟写入
+let pending = {}, timer = 0;
+const setLater = (patch) => {
+  settings = { ...settings, ...patch };
+  pending = { ...pending, ...patch };
+  clearTimeout(timer);
+  timer = setTimeout(() => { const p = pending; pending = {}; saveSettings(p); }, 250);
+};
 
 function statusBox() {
   const best = statuses.filter((s) => s.on).sort((a, b) => (b.source ? 1 : 0) - (a.source ? 1 : 0))[0];
@@ -79,8 +87,8 @@ function render() {
       h('label', {}, h('input', { type: 'checkbox', id: 'hide', checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), '隐藏网站自带字幕（只看悬浮字幕）')),
     h('div', { class: 'sec' },
       h('div', { class: 'row' },
-        h('div', { class: 'grow' }, h('label', { class: 'f', for: 'fs' }, '字号'), h('input', { type: 'range', id: 'fs', min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => set({ fontScale: +e.target.value }) })),
-        h('div', { class: 'grow' }, h('label', { class: 'f', for: 'bg' }, '背景深浅'), h('input', { type: 'range', id: 'bg', min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => set({ bg: +e.target.value }) }))),
+        h('div', { class: 'grow' }, h('label', { class: 'f', for: 'fs' }, '字号'), h('input', { type: 'range', id: 'fs', min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => setLater({ fontScale: +e.target.value }) })),
+        h('div', { class: 'grow' }, h('label', { class: 'f', for: 'bg' }, '背景深浅'), h('input', { type: 'range', id: 'bg', min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => setLater({ bg: +e.target.value }) }))),
       h('div', { class: 'row', style: 'margin-top:8px' },
         h('button', { class: 'btn grow', id: 'pick', disabled: !supported(), title: '网站没有被自动识别时：点一下正在显示的字幕文字', onClick: async () => { await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on: true }).catch(() => {}); chrome.tabs.sendMessage(tab.id, { type: 'pick' }).catch(() => {}); if (!q.get('tabId')) window.close(); } }, '选取字幕位置'),
         h('button', { class: 'btn grow', id: 'reset', title: '恢复默认位置，并清除这个网站上手动选取的字幕位置', onClick: () => set({ pos: null, pickers: Object.fromEntries(Object.entries(settings.pickers).filter(([k]) => k !== site)) }) }, '重置位置'))),

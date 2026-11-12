@@ -937,9 +937,10 @@
       if (!on) report({ on: false });
     };
     watchSettings((s) => {
+      const was = !!settings.sites[site];
       settings = s;
       ctl.setSettings(s);
-      if (s.sites[site] && !ctl.on) ctl.start();
+      if (!was && s.sites[site] && !ctl.on) ctl.start();
     });
     if (settings.sites[site]) ctl.start();
     const shouldPick = () => !!pickVideo(document) || isTop && !document.querySelector("iframe");

@@ -2,14 +2,15 @@
 
 > 把每一堂外语专业课，变成可以反复精听的专业听力教材——**课上听懂，课后听会**。
 
-面向留学生的课程听力辅助工具（Web 版，后续可做成浏览器插件）。与普通实时字幕工具最大的不同：**实时字幕只是入口，核心是把课堂内容长期沉淀为精听素材，并把"没听懂的地方"变成定向训练**。支持英语 / 法语 / 中文。
+面向留学生的课程听力辅助工具（Web 版），外加一个**Chrome 字幕翻译插件**（看剧 / 看网页视频时实时翻译字幕）。与普通实时字幕工具最大的不同：**实时字幕只是入口，核心是把课堂内容长期沉淀为精听素材，并把"没听懂的地方"变成定向训练**。支持英语 / 法语 / 中文。
 
 | 文档 | 内容 |
 |---|---|
 | [docs/01-PRD.md](docs/01-PRD.md) | 产品需求：背景、真实样本研究、用户、目标与指标、用户故事、功能/非功能需求、优先级、ASR/翻译/Claude 选型与成本 |
 | [docs/02-product-design.md](docs/02-product-design.md) | 产品设计：信息架构、核心流程、页面原型、交互细则、视觉规范 |
 | [docs/03-frontend-plan.md](docs/03-frontend-plan.md) | 前端技术方案：选型对比、分层架构、目录、路由、数据模型、关键模块、插件演进 |
-| [app/](app/) | 可运行的 MVP 代码 |
+| [extension/README.md](extension/README.md) | Chrome 字幕翻译插件：安装、使用、隐私与局限 |
+| [app/](app/) | 可运行的 Web 应用代码 |
 
 ![Studio：转录 + 笔记 + 时间轴](docs/screenshots/studio.jpg)
 
@@ -86,7 +87,7 @@ npm install
 npm run dev:mock
 ```
 
-`dev:mock` 用本地**模拟的** Claude 与 Google 接口启动（输出为占位内容），用于无密钥联调。`npm test` 运行领域层单元测试；设置 `SAMPLES_DIR=<存放 docx 的目录>` 可额外用你的真实转录跑一遍。升级 `@anthropic-ai/sdk` 后运行 `npm run build:sdk` 重新生成浏览器用的 SDK 打包文件（`public/vendor/anthropic-sdk.mjs`，已提交，平时无需构建）。
+`dev:mock` 用本地**模拟的** Claude 与 Google 接口启动（输出为占位内容），用于无密钥联调。`npm test` 运行领域层与插件的单元测试（含“插件构建产物没过期”检查）；改了 `extension/src` 后运行 `npm run build:ext` 重新打包（产物与下载用的 zip 都已提交）；`node tests/e2e/*.cjs` 是 Playwright 端到端测试（需 `playwright` 与 chromium；插件的那个会在真实 Chromium 里加载未打包的扩展）；设置 `SAMPLES_DIR=<存放 docx 的目录>` 可额外用你的真实转录跑一遍。升级 `@anthropic-ai/sdk` 后运行 `npm run build:sdk` 重新生成浏览器用的 SDK 打包文件（`public/vendor/anthropic-sdk.mjs`，已提交，平时无需构建）。
 
 ---
 
@@ -94,8 +95,8 @@ npm run dev:mock
 
 | 模块 | 你能做什么 | 位置 |
 |---|---|---|
-| **实时听课** | Web Speech 实时字幕 + 0–2 种译文（英/法/中互译）；同步录音，句子带真实时间戳；**原文淡出**（按住 H 才显示）；按 `Space` 一键标"没听懂"（最近约 15 秒）；结束即归档；30 秒自动存草稿 | 上课 |
-| **课程素材库** | 学期 › 课程 › 课时 › 片段（Part）；导入 `.docx`（语音备忘录导出）/ `.txt` / `.srt` / `.vtt` + 可选录音；从文件名识别日期与课程；跨课程全文搜索并直达那一句 | 课程库 |
+| **实时听课** | Web Speech 实时字幕 + 0–2 种译文（英/法/中互译）；同步录音，句子带真实时间戳；**整堂字幕可上滑回看**；老师**持续讲话不停顿**时稳定的前半句会提前出现并立即翻译；**原文淡出**（按住 H 才显示）；按 `Space` 一键标"没听懂"（最近约 15 秒）；结束即归档；30 秒自动存草稿 | 上课 |
+| **课程素材库** | 学期 › 课程 › 课时 › 片段（Part）；**课程改名/换学期、课时改名/移动/批量移动、片段重命名/并入/拆分**（各处的 ✎）；导入 `.docx`（语音备忘录导出）/ `.txt` / `.srt` / `.vtt` + 可选录音；从文件名识别日期与课程；跨课程全文搜索并直达那一句 | 课程库 |
 | **笔记归纳** | 摘要笔记 / 原文对照 / 我的笔记三视图；Claude 生成概览、Part 摘要、要点、概念、公式（含口述）、老师强调、待问问题，**每条都能 ▶ 回听原话**；导出 Markdown | 课时 › 笔记 |
 | **精听素材** | 录音 / 朗读 / 静音计时三种播放引擎；0.5×–2× 变速不变调；A-B 循环、逐句重复 N 遍；时间轴显示 Part、卡点、片段、语速密度，**拖拽框选**即可标卡点或存为带标签的片段 | 课时 › 播放条 |
 | **语言拆解** | 专业词汇（三语释义 + 例句回听 + "常被听成"）、讲者句式（定义/强调/对比/因果…）及扩展例句；导出 Anki（TSV） | 课时 › 语言、词汇 |
@@ -104,6 +105,7 @@ npm run dev:mock
 | **后台录制 + 悬浮字幕** | 录音在切换页面 / 标签页时不会中断（顶部有录音条，可随时标“没听懂”）；字幕可做成可拖动、可缩放、可调背景透明度的悬浮块，也能“弹出到桌面”（Chrome / Edge 的画中画窗口，浮在其他软件之上；浏览器窗口无法真正透明，桌面窗口只能调大小、字号、深浅） | 上课 |
 | **朗读语音** | 没有录音时用朗读代替：自动避开 Whisper / Zarvox 等搞怪语音，只在有 Google / Premium 等自然语音时朗读，否则静音计时；设置页可手动选并试听 | 设置 |
 | **多服务商 API 密钥（实验性）** | 一个输入框粘贴密钥，按格式自动识别并验证服务商（Claude、OpenAI、Gemini、DeepSeek、Kimi、智谱、通义、豆包、硅基流动、OpenRouter、Groq、xAI、自定义 OpenAI 兼容地址）；可保存多个并分别指定“笔记/词汇”和“实时翻译”。**除 Claude 外尚未用真实密钥验证**；个别服务商不允许浏览器直连时，会经同源中继（`/relay`）转发 | 设置 |
+| **Chrome 字幕翻译插件** | 看网页视频时读取**已有的字幕**并实时翻译，法 / 英 / 中互译；悬浮在视频上（全屏也能看），可拖动、调字号；自动识别 YouTube / Netflix 等站点和标准字幕轨道，识别不了就“点一下字幕”手动选取；不填密钥也能用（免费 Google 翻译），填 AI 密钥更贴合语气，失败自动降级。**没有字幕的视频不支持**；真实站点未验证（见 [插件说明](extension/README.md)） | 设置 › 下载插件 |
 | **识别日志** | 字幕丢句或时间对不上时，导出识别引擎的事件日志用于排查（只含文字与时间） | 设置 › 数据 |
 
 快捷键在任意页面按 `?` 查看。Studio 常用：`Space` 播放、`← →` 换句、`L` 循环当前句、`[ ]` 变速、`M` 标卡点、`H` 盲听。
@@ -127,11 +129,13 @@ wrangler.jsonc                       Cloudflare 部署配置：只发布 lecture
 lectureloop/
 ├─ start-mac.command / start-windows.bat / start.sh   一键启动
 ├─ docs/                 PRD / 产品设计 / 前端方案 / 截图
+├─ extension/            Chrome 字幕翻译插件（src/ 源码 · dist/ 打包产物 · popup/ options/ · README.md）
 └─ app/
    ├─ server.js          静态托管 + /api/config /api/translate /api/ai/notes /api/ai/language（--open 自动打开浏览器）
    ├─ server/            claude.js（官方 SDK：结构化输出 + 流式 + 拒答处理）· ai.js · translate.js · env.js
-   ├─ tools/             mock-api.mjs、dev-mock.mjs（无密钥联调）· build-sdk.mjs（打包浏览器版 SDK）
-   ├─ tests/             domain.test.mjs（node:test）
+   ├─ worker/            Cloudflare Worker：静态资源 + /relay 同源中继
+   ├─ tools/             mock-api.mjs、dev-mock.mjs（无密钥联调）· build-sdk.mjs（打包浏览器版 SDK）· build-ext.mjs（打包插件 + 生成 zip）
+   ├─ tests/             domain.test.mjs · ext.test.mjs（node:test）· e2e/*.cjs（Playwright）
    └─ public/            无构建前端：Preact + htm（vendored，离线可用）；_headers 为在线版安全响应头
       ├─ vendor/         htm-preact.js · anthropic-sdk.mjs（官方 SDK 浏览器打包，按需加载）
       └─ js/  lib/（领域逻辑，可在 Node 测试；ai-tasks.js 为服务端与浏览器共用的提示词/Schema/校验）· components/ · views/ · store.js · db.js
@@ -140,7 +144,8 @@ lectureloop/
 ## 隐私与合规
 
 - 录音、转录、卡点**只保存在本机浏览器**（IndexedDB）。调用 Claude / 翻译时只发送**文本**，从不发送音频。
-- 本地版的密钥只在服务端；在线版用户自带的密钥只存在本人浏览器（localStorage），只发往 api.anthropic.com，不进备份文件。
+- 本地版的密钥只在服务端；在线版用户自带的密钥只存在本人浏览器（localStorage），只发往你选的服务商（个别服务商经同源中继），不进备份文件。
+- Chrome 插件默认休眠，只在你开启的标签页/网站读取字幕；只有字幕文字发给翻译服务；密钥存在插件自己的存储里，网页读不到。
 - 浏览器的实时识别（Web Speech）可能由浏览器厂商的云服务处理语音；需要完全本地时请改用"导入转录"。
 - 开始课堂录音前，请确认已获得授课教师 / 学校的许可（首次录音时应用会要求确认）。
 
@@ -150,7 +155,9 @@ lectureloop/
 - Web Speech 对专业术语和口音的识别有限，且没有词级时间戳；这正是"听力陷阱 + 课程术语表"要弥补的。V1 计划接入云端流式 ASR，以及课后用 Whisper 类服务重转写拿到真实时间戳。
 - 估算时间轴需要录音 + 锚点校准才精准；没有录音时"朗读 / 静音计时"引擎只用于对照阅读与演示，不是真实课堂声音。
 - 浏览器内置翻译（Chrome Translator API）作为最后一级降级，属实验性。
-- Firefox 不支持实时识别（可以导入与练习）；暂无真实波形、多端同步、浏览器插件（见 PRD 路线图）。
+- Firefox 不支持实时识别（可以导入与练习）；暂无真实波形、多端同步。
+- **字幕翻译插件**：只读已有字幕（没有字幕的视频需要音频识别，尚未做）；没有在真实的 Netflix / YouTube / Prime / 哔哩哔哩上验证过（开发环境访问不了），只在照它们页面结构仿制的测试页上通过；Chrome 内置翻译与非 Anthropic 的 AI 服务商也没有真实验证。
+- **多服务商密钥**除 Anthropic 外未用真实密钥验证；**同源中继**未真正请求过；**悬浮字幕“弹出到桌面”的真实 PiP 窗口、后台标签页被隐藏时的真实录音**只用模拟环境测过。
 
 ---
 
