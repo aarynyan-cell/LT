@@ -21,7 +21,7 @@ const MOCK = 'http://127.0.0.1:8788';
   const ctx = await chromium.launchPersistentContext(dir, {
     channel: 'chromium', headless: true, viewport: { width: 1100, height: 760 },
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, '--autoplay-policy=no-user-gesture-required',
-      '--host-resolver-rules=MAP www.youtube.com 127.0.0.1, MAP www.netflix.com 127.0.0.1'],
+      '--host-resolver-rules=MAP www.youtube.com 127.0.0.1, MAP www.netflix.com 127.0.0.1, MAP www.example.test 127.0.0.1'],
   });
   let [sw] = ctx.serviceWorkers();
   if (!sw) sw = await ctx.waitForEvent('serviceworker', { timeout: 20000 });
@@ -170,6 +170,31 @@ const MOCK = 'http://127.0.0.1:8788';
     await until(async () => (await getSync()).sites?.['127.0.0.1'] === true, 3000, '“此网站总是开启”写入设置');
     await pop.locator('#reset').click();
     await until(async () => Object.keys((await getSync()).pickers || {}).length === 0, 3000, '重置清除手动选取');
+    await pop.close(); await closeExtra();
+  });
+
+  await step('真实场景：拿不到标签页地址（没有主机权限的网站）时，弹窗仍然可用，不误报"页面不支持"', async () => {
+    await resetStore();
+    await setSync(baseSettings());
+    const p = await open('http://www.example.test:8799/page.html?mode=track');
+    await seek(p, 3);
+    // 没有主机权限时连标签页的 url/title 都查不到，只能让内容脚本自报家门（ping 回复里有 site）来找到这个标签页
+    const tid = await until(() => admin.evaluate(async () => {
+      for (const t of await chrome.tabs.query({})) { const r = await chrome.tabs.sendMessage(t.id, { type: 'ping' }).catch(() => null); if (r?.site === 'www.example.test') return t.id; }
+      return 0;
+    }), 6000, '找到这个标签页');
+    // 前提：这个站不在 host_permissions 里，扩展页面读到的标签页是没有 url 的（用户那边的弹窗就是因此误报）
+    eq(await admin.evaluate(async (t) => (await chrome.tabs.get(t)).url ?? null, tid), null, '标签页地址对扩展不可见');
+    const pop = await ctx.newPage(); watch(pop, 'popup');
+    await pop.goto(`chrome-extension://${id}/popup/popup.html?tabId=${tid}`); // 不传 url：与真实弹窗一样只有标签页 id
+    await pop.waitForSelector('#on');
+    if (/不支持/.test(await pop.locator('.status').textContent())) throw new Error('误报了"这个页面不支持"');
+    eq(await pop.locator('#on').isDisabled(), false, '开关应可用');
+    await until(async () => /www\.example\.test/.test(await pop.locator('#app').textContent()), 4000, '用内容脚本报告的网站名显示');
+    await pop.locator('label.switch').click();
+    await until(async () => (await ov(p))?.t1?.startsWith('[g:zh-CN] Je ne sais pas'), 9000, '开启后显示译文');
+    await pop.locator('#always').check();
+    await until(async () => (await getSync()).sites?.['www.example.test'] === true, 3000, '“总是开启”记在这个网站下');
     await pop.close(); await closeExtra();
   });
 

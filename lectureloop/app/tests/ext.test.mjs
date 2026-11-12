@@ -311,7 +311,7 @@ test('构建产物是最新的（dist / manifest.json 与源码一致；改了�
 test('manifest：MV3、权限最小、快捷键、主机权限覆盖各服务商', () => {
   const m = manifest();
   assert.equal(m.manifest_version, 3);
-  assert.deepEqual(m.permissions, ['storage']);
+  assert.deepEqual(m.permissions, ['storage', 'activeTab', 'scripting']);
   assert.ok(m.host_permissions.includes('https://api.anthropic.com/*') && m.host_permissions.includes('https://translate.googleapis.com/*'));
   assert.equal(m.commands.toggle.suggested_key.default, 'Alt+T');
   assert.equal(m.content_scripts[0].all_frames, true);

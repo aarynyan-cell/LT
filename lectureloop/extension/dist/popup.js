@@ -186,9 +186,15 @@
   var settings = null;
   var keys = null;
   var statuses = [];
+  var pageSite = "";
+  var blocked = false;
   async function init() {
-    if (q.get("tabId")) tab = { id: +q.get("tabId"), url: q.get("url") || "" };
-    else [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (q.get("tabId")) {
+      tab = await chrome.tabs.get(+q.get("tabId")).catch(() => ({ id: +q.get("tabId") }));
+      if (q.get("url")) tab = { ...tab, url: q.get("url") };
+    } else [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const r = await ensureScript();
+    if (r) pageSite = r.site || "";
     settings = await loadSettings();
     keys = await loadKeys();
     await readStatus();
@@ -213,16 +219,33 @@
     try {
       return new URL(tab.url).hostname;
     } catch {
-      return "";
+      return pageSite;
     }
   };
-  var supported = () => /^https?:/i.test(tab?.url || "");
+  var supported = () => tab?.url ? /^https?:/i.test(tab.url) : !blocked;
+  var ping = () => chrome.tabs.sendMessage(tab.id, { type: "ping" }).catch(() => null);
+  async function ensureScript() {
+    let r = await ping();
+    if (r) return r;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["dist/content.js"] });
+    } catch {
+      blocked = true;
+      return null;
+    }
+    await new Promise((res) => setTimeout(res, 150));
+    r = await ping();
+    if (!r) blocked = true;
+    return r;
+  }
   var isOn = () => statuses.some((s) => s.on);
   async function setEnabled(on) {
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "setEnabled", on });
-    } catch {
+    if (on && !await ensureScript()) {
+      render();
+      return;
     }
+    await chrome.tabs.sendMessage(tab.id, { type: "setEnabled", on }).catch(() => {
+    });
     if (!on) statuses = [];
     setTimeout(async () => {
       await readStatus();
@@ -248,7 +271,7 @@
   };
   function statusBox() {
     const best = statuses.filter((s) => s.on).sort((a, b) => (b.source ? 1 : 0) - (a.source ? 1 : 0))[0];
-    if (!supported()) return h("div", { class: "status warn" }, "\u8FD9\u4E2A\u9875\u9762\u4E0D\u652F\u6301\uFF08\u6D4F\u89C8\u5668\u5185\u90E8\u9875\u9762\u6216\u5E94\u7528\u5546\u5E97\u9875\u9762\u65E0\u6CD5\u4F7F\u7528\u6269\u5C55\uFF09\u3002");
+    if (!supported()) return h("div", { class: "status warn" }, "\u8FD9\u4E2A\u9875\u9762\u4E0D\u652F\u6301\uFF1A\u6D4F\u89C8\u5668\u5185\u90E8\u9875\u9762\uFF08chrome://\u2026\uFF09\u548C\u5E94\u7528\u5546\u5E97\u9875\u9762\u4E0D\u5141\u8BB8\u6269\u5C55\u8BFB\u53D6\u3002\u8BF7\u5207\u5230\u6709\u89C6\u9891\u7684\u7F51\u9875\u518D\u70B9\u5F00\u3002");
     if (!best) return h("div", { class: "status muted" }, "\u672A\u5F00\u542F\u3002\u6253\u5F00\u4E0A\u9762\u7684\u5F00\u5173\uFF0C\u6216\u6309 Alt+T\u3002");
     const lines = [];
     let tone = "ok";
@@ -329,6 +352,7 @@
           "div",
           { class: "row", style: "margin-top:8px" },
           h("button", { class: "btn grow", id: "pick", disabled: !supported(), title: "\u7F51\u7AD9\u6CA1\u6709\u88AB\u81EA\u52A8\u8BC6\u522B\u65F6\uFF1A\u70B9\u4E00\u4E0B\u6B63\u5728\u663E\u793A\u7684\u5B57\u5E55\u6587\u5B57", onClick: async () => {
+            if (!await ensureScript()) return render();
             await chrome.tabs.sendMessage(tab.id, { type: "setEnabled", on: true }).catch(() => {
             });
             chrome.tabs.sendMessage(tab.id, { type: "pick" }).catch(() => {

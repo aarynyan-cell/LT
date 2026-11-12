@@ -26,7 +26,8 @@ export function manifest() {
     options_ui: { page: 'options/options.html', open_in_tab: true },
     background: { service_worker: 'dist/background.js' },
     content_scripts: [{ matches: ['<all_urls>'], js: ['dist/content.js'], all_frames: true, run_at: 'document_idle' }],
-    permissions: ['storage'],
+    // activeTab：点插件图标时临时获得当前标签页的地址与注入权（没有它，弹窗拿不到 tab.url，会误报“页面不支持”）；scripting：给装插件之前就已打开的页面补注入内容脚本
+    permissions: ['storage', 'activeTab', 'scripting'],
     host_permissions: [...cspOrigins().map((o) => o + '/*'), 'https://translate.googleapis.com/*', 'http://localhost/*', 'http://127.0.0.1/*'],
     optional_host_permissions: ['https://*/*', 'http://*/*'],
     commands: { toggle: { suggested_key: { default: 'Alt+T' }, description: '开 / 关当前标签页的字幕翻译' } },

@@ -7,10 +7,15 @@ import { PROVIDERS } from '../../app/public/js/lib/providers.js';
 const q = new URLSearchParams(location.search);
 const app = document.getElementById('app');
 let tab = null, settings = null, keys = null, statuses = [];
+let pageSite = '';        // 内容脚本报告的网站（拿不到标签页地址时用它）
+let blocked = false;       // 内容脚本连不上、也注入不进去：浏览器内部页面 / 应用商店页面
 
 async function init() {
-  if (q.get('tabId')) tab = { id: +q.get('tabId'), url: q.get('url') || '' }; // 测试：在普通标签页里打开弹窗并指定目标标签页
+  // 注意：没有 tabs / activeTab / 主机权限时，Chrome 不会给出 tab.url（只有 id）——不能靠地址判断页面是否可用
+  if (q.get('tabId')) { tab = await chrome.tabs.get(+q.get('tabId')).catch(() => ({ id: +q.get('tabId') })); if (q.get('url')) tab = { ...tab, url: q.get('url') }; } // 测试：在普通标签页里打开弹窗并指定目标标签页
   else [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const r = await ensureScript();
+  if (r) pageSite = r.site || '';
   settings = await loadSettings();
   keys = await loadKeys();
   await readStatus();
@@ -23,12 +28,26 @@ async function readStatus() {
   const all = await chrome.storage.session.get(null);
   statuses = Object.entries(all).filter(([k]) => k.startsWith(`st:${tab?.id}:`)).map(([, v]) => v);
 }
-const siteOfTab = () => { try { return new URL(tab.url).hostname; } catch { return ''; } };
-const supported = () => /^https?:/i.test(tab?.url || '');
+const siteOfTab = () => { try { return new URL(tab.url).hostname; } catch { return pageSite; } };
+// 地址已知且不是网页（chrome:// 等）才算不支持；地址未知时以"内容脚本能不能连上"为准
+const supported = () => (tab?.url ? /^https?:/i.test(tab.url) : !blocked);
+
+const ping = () => chrome.tabs.sendMessage(tab.id, { type: 'ping' }).catch(() => null);
+/** 内容脚本在吗？不在（插件是在这个页面打开之后才装/更新的）就用 activeTab 权限补注入一次；注入不了说明是浏览器不允许的页面 */
+async function ensureScript() {
+  let r = await ping();
+  if (r) return r;
+  try { await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['dist/content.js'] }); } catch { blocked = true; return null; }
+  await new Promise((res) => setTimeout(res, 150));
+  r = await ping();
+  if (!r) blocked = true;
+  return r;
+}
 const isOn = () => statuses.some((s) => s.on);
 
 async function setEnabled(on) {
-  try { await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on }); } catch { /* 页面还没加载内容脚本（刚装好插件的老标签页） */ }
+  if (on && !(await ensureScript())) { render(); return; }
+  await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on }).catch(() => {});
   if (!on) statuses = [];
   setTimeout(async () => { await readStatus(); render(); }, 400);
 }
@@ -44,7 +63,7 @@ const setLater = (patch) => {
 
 function statusBox() {
   const best = statuses.filter((s) => s.on).sort((a, b) => (b.source ? 1 : 0) - (a.source ? 1 : 0))[0];
-  if (!supported()) return h('div', { class: 'status warn' }, '这个页面不支持（浏览器内部页面或应用商店页面无法使用扩展）。');
+  if (!supported()) return h('div', { class: 'status warn' }, '这个页面不支持：浏览器内部页面（chrome://…）和应用商店页面不允许扩展读取。请切到有视频的网页再点开。');
   if (!best) return h('div', { class: 'status muted' }, '未开启。打开上面的开关，或按 Alt+T。');
   const lines = [];
   let tone = 'ok';
@@ -90,7 +109,7 @@ function render() {
         h('div', { class: 'grow' }, h('label', { class: 'f', for: 'fs' }, '字号'), h('input', { type: 'range', id: 'fs', min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => setLater({ fontScale: +e.target.value }) })),
         h('div', { class: 'grow' }, h('label', { class: 'f', for: 'bg' }, '背景深浅'), h('input', { type: 'range', id: 'bg', min: 0, max: 1, step: 0.05, value: settings.bg, onInput: (e) => setLater({ bg: +e.target.value }) }))),
       h('div', { class: 'row', style: 'margin-top:8px' },
-        h('button', { class: 'btn grow', id: 'pick', disabled: !supported(), title: '网站没有被自动识别时：点一下正在显示的字幕文字', onClick: async () => { await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on: true }).catch(() => {}); chrome.tabs.sendMessage(tab.id, { type: 'pick' }).catch(() => {}); if (!q.get('tabId')) window.close(); } }, '选取字幕位置'),
+        h('button', { class: 'btn grow', id: 'pick', disabled: !supported(), title: '网站没有被自动识别时：点一下正在显示的字幕文字', onClick: async () => { if (!(await ensureScript())) return render(); await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', on: true }).catch(() => {}); chrome.tabs.sendMessage(tab.id, { type: 'pick' }).catch(() => {}); if (!q.get('tabId')) window.close(); } }, '选取字幕位置'),
         h('button', { class: 'btn grow', id: 'reset', title: '恢复默认位置，并清除这个网站上手动选取的字幕位置', onClick: () => set({ pos: null, pickers: Object.fromEntries(Object.entries(settings.pickers).filter(([k]) => k !== site)) }) }, '重置位置'))),
     h('div', { class: 'sec' },
       sel('eng', { auto: '自动（有 AI 密钥用 AI，否则用 Google 免费）', llm: '只用 AI 密钥', gtx: '只用 Google 免费翻译', chrome: '只用 Chrome 内置翻译' }, settings.engine, (v) => set({ engine: v }), '翻译引擎'),

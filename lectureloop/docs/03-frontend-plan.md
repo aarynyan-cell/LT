@@ -481,7 +481,7 @@ offscreen document：chrome.tabCapture.getMediaStreamId → getUserMedia(chromeM
 - **XSS**：htm 默认转义文本；高亮用节点拼装而非 `innerHTML`。
 - **隐私**：只向外发送文本；音频不出设备；设置页明示识别服务（Web Speech）可能由浏览器厂商处理语音。
 - **自带密钥（在线版）**：多服务商密钥只存 `localStorage`，不进 IndexedDB、不进备份；只发往用户选的服务商；浏览器跨域被拦截时走同源 `/relay`——Origin 校验、**主机白名单**（`custom` 不在内，防止被当开放代理）、只转发必要请求头、不记录密钥；CSP `connect-src` 列出各服务商来源。
-- **插件**：默认休眠；只有字幕文字外发；密钥在 `storage.local` 且 `TRUSTED_CONTEXTS`（内容脚本读取被拒绝，已有端到端测试）；悬浮层与选取器在 Shadow DOM 中，页面文本一律 `textContent`；权限最小（`storage` + 明列的 API 域名 + localhost）；`<all_urls>` 内容脚本是为了在任意视频站读字幕，已在说明文档中解释。
+- **插件**：默认休眠；只有字幕文字外发；密钥在 `storage.local` 且 `TRUSTED_CONTEXTS`（内容脚本读取被拒绝，已有端到端测试）；悬浮层与选取器在 Shadow DOM 中，页面文本一律 `textContent`；权限最小（`storage` + `activeTab` + `scripting` + 明列的 API 域名 + localhost；弹窗**不能依赖 `tab.url`**——没有 tabs/主机权限时 Chrome 不给地址，是否可用以"内容脚本能否连上/补注入"为准）；`<all_urls>` 内容脚本是为了在任意视频站读字幕，已在说明文档中解释。
 
 ---
 
