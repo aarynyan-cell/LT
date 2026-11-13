@@ -2,6 +2,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { asrWords, json3 } = require('./ext-data.cjs');
+const hits = { timedtext: 0, watch: 0 }; // 统计请求次数（断言"第二次打开不再取字幕"）
 
 const CUES = [
   [0.0, 2.0, 'Salut, comment ça va ?'], [2.5, 4.5, 'Je ne sais pas ce que vous voulez.'], [5.0, 7.0, "C'est trop tard, il faut partir."],
@@ -23,7 +25,24 @@ const WAV = wav();
 function start(port = 8799) {
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
-    if (u.pathname === '/page.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(__dirname, 'ext-pages/page.html'))); }
+    // 仿 YouTube：/watch?v=… 返回测试页（页面里内嵌 captionTracks，与真实页面 HTML 里的位置一样）；/timedtext 返回字幕数据
+    const origin = `http://${req.headers.host}`;
+    const tracks = hits.noTracks ? [] : [{ baseUrl: `${origin}/timedtext?v=TESTVID12345&lang=fr&kind=asr`, name: { simpleText: 'French (auto-generated)' }, languageCode: 'fr', kind: 'asr' }];
+    if (u.pathname === '/watch') {
+      hits.watch++;
+      const html = fs.readFileSync(path.join(__dirname, 'ext-pages/page.html'), 'utf8').replace('__YT_DATA__', JSON.stringify({ captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks, audioTracks: [] } } }));
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(html);
+    }
+    if (u.pathname === '/timedtext') {
+      hits.timedtext++;
+      if (u.searchParams.get('variant') === 'empty' || process.env.TIMEDTEXT_EMPTY) { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(''); } // YouTube 有时对非播放器请求返回空内容
+      if (u.searchParams.get('fmt') === 'json3') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(json3())); }
+      res.writeHead(200, { 'content-type': 'text/xml' });
+      return res.end('<?xml version="1.0"?><transcript>' + asrWords().map((x) => `<text start="${x.t}" dur="0.3">${x.w.replace(/'/g, '&amp;#39;')}</text>`).join('') + '</transcript>');
+    }
+    if (u.pathname === '/yt-words.json') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(asrWords())); }
+    if (u.pathname === '/__hits') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(hits)); }
+    if (u.pathname === '/page.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(__dirname, 'ext-pages/page.html'), 'utf8').replace('__YT_DATA__', 'null')); }
     if (u.pathname === '/fr.vtt') { res.writeHead(200, { 'content-type': 'text/vtt; charset=utf-8' }); return res.end(VTT); }
     if (u.pathname === '/silence.wav') {
       const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
@@ -39,4 +58,4 @@ function start(port = 8799) {
   });
   return new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv)));
 }
-module.exports = { start, CUES };
+module.exports = { start, CUES, hits };

@@ -2,6 +2,8 @@
 import { buildSources, readFirst, seekTo, pickVideo } from './sources.js';
 import { Recorder } from './recorder.js';
 import { videoKeyOf } from './videokey.js';
+import { loadYouTubeTranscript } from './yt.js';
+import { LANGS } from './langs.js';
 import { Stabilizer } from './stabilizer.js';
 import { TranslateQueue } from './translator.js';
 import { Overlay } from './overlay.js';
@@ -19,6 +21,7 @@ export class Controller {
    */
   constructor({ doc = globalThis.document, site, settings, send, saveSettings, report = () => {}, rpc = async () => ({}), timers = undefined }) {
     this.doc = doc; this.site = site; this.settings = settings; this.saveSettings = saveSettings; this.report = report; this.rpc = rpc;
+    this.tx = { state: 'idle', info: null, error: '' }; this.replaceNext = false;
     this.rec = new Recorder(); this.vk = null; this.ready = false; this.curLineId = ''; this.flushTimer = 0; this.loop = null;
     this.cachedHits = 0; this.on = false; this.cur = ''; this.src = null; this.lastSeen = 0; this.error = ''; this.note = ''; this.recent = [];
     this.queue = new TranslateQueue({
@@ -63,6 +66,7 @@ export class Controller {
     if (srcChanged) { this.sources?.textTrack.restore(); this._rebuild(); this.prefetched.clear(); }
     this.overlay.setOptions(this._ov());
     if (prev.targets.join() !== s.targets.join() || prev.source !== s.source || prev.engine !== s.engine) { this.queue.clear(); if (this.cur) this._translate(this.cur); }
+    if (prev.ytTranscript !== s.ytTranscript || prev.source !== s.source) { this.tx = { state: 'idle', info: null, error: '' }; if (this._wantTranscript()) this._loadTranscript(); }
     if (prev.targets.join() !== s.targets.join()) this._seedFromLines();
     this._render();
   }
@@ -70,7 +74,7 @@ export class Controller {
   _ov() { const s = this.settings; return { fontScale: s.fontScale, bg: s.bg, showOrig: s.showOrig, hideSite: s.hideSite, pos: s.pos }; }
 
   _rebuild() {
-    this.sources = buildSources(this.doc, this.settings, this.site);
+    this.sources = buildSources(this.doc, this.settings, this.site, () => this._tx());
     this.overlay.setOptions(this._ov());
     // 隐藏网站自带字幕：给已知字幕容器加 visibility:hidden（文字仍在 DOM 里，我们继续读取）
     this.styleEl?.remove(); this.styleEl = null;
@@ -116,7 +120,8 @@ export class Controller {
     if (!raw && this.cur) { this.emptySince ||= Date.now(); if (Date.now() - this.emptySince < 250) { this._status(); return; } } else this.emptySince = 0;
     const text = this.stab.push(raw, found?.rolling);
     if (text !== this.cur) { this.cur = text; this.curLineId = ''; this._render(); }
-    if (this.ready) { this._loadTrack(); if (this.curLineId) this.rec.touch(this.curLineId, this._now()); }
+    if (found?.lineId) this.curLineId = found.lineId;
+    if (this.ready) { if (this.tx.state !== 'ready') this._loadTrack(); if (this.curLineId && found?.id !== 'transcript') this.rec.touch(this.curLineId, this._now()); }
     this._status();
   }
 
@@ -135,13 +140,15 @@ export class Controller {
     if (!text) { this.overlay.hide(); return; }
     const { source, targets } = this._lineInfo(text);
     const tr = targets.length ? this.queue.peek(text, source, targets) || {} : {};
-    this.overlay.show({ orig: text, tr, targets: this.settings.targets, error: this.error });
+    // 转录来源与网站是否打开了字幕无关：网站字幕没显示时，悬浮层里带上原文，不然只看到译文
+    const forceOrig = this.src?.id === 'transcript' && !this.doc.querySelector('.ytp-caption-window-container .ytp-caption-segment, .player-timedtext-text-container');
+    this.overlay.show({ orig: text, tr, targets: this.settings.targets, error: this.error, forceOrig });
   }
 
   /** 视频字幕轨道整条载入时，提前翻译接下来约 90 秒的字幕，播放到时译文已经在缓存里 */
   _prefetch() {
-    if (!this.on || this.doc.hidden || this.src?.id !== 'texttrack') return;
-    const up = this.sources.textTrack.upcoming(24, 90);
+    if (!this.on || this.doc.hidden || (this.src?.id !== 'texttrack' && this.src?.id !== 'transcript')) return;
+    const up = (this.src.id === 'transcript' ? this.sources.transcript : this.sources.textTrack).upcoming(24, 90);
     for (const c of up) {
       const { source, targets } = this._lineInfo(c.text);
       if (!targets.length) continue;
@@ -167,8 +174,14 @@ export class Controller {
     const key = k.key;
     this.rpc('tx-get', { key }).then((r) => {
       if (this.vk?.key !== key) return; // 读的过程中视频又换了
-      if (r?.video?.lines?.length) { this.rec.load(r.video.lines); this._seedFromLines(); }
+      const v = r?.video;
+      if (v?.lines?.length) this.rec.load(v.lines);
+      // 上次已经整理好的 YouTube 转写：直接用，不用再取一遍
+      if (v?.src === 'yt-transcript' && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: 'ready', info: v.srcInfo || null, error: '' };
+      else this.tx = { state: 'idle', info: null, error: '' };
+      this._seedFromLines();
       this.ready = true;
+      if (this._wantTranscript() && this.tx.state !== 'ready') this._loadTranscript();
     }).catch(() => { this.ready = true; });
   }
 
@@ -194,7 +207,7 @@ export class Controller {
 
   /** 一句稳定下来：记进转录，并记下它的 id（侧边栏据此高亮当前句） */
   _record(text) {
-    if (!this.vk) return;
+    if (!this.vk || this.tx.state === 'ready') return; // 转录已就绪：句子都在里面，不再另记屏幕字幕
     const lang = this.src?.lang || this._lineInfo(text).source;
     this.curLineId = this.rec.observe(text, Math.max(0, this._now() - 0.15), lang);
     this._flushSoon();
@@ -205,9 +218,34 @@ export class Controller {
     clearTimeout(this.flushTimer); this.flushTimer = 0;
     if (!this.vk || !this.rec.hasDirty) return;
     const lines = this.rec.take();
-    const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || '').trim() || this.vk.title, lang: this.src?.lang || lines[0]?.lang || null };
-    this.rpc('tx-upsert', { video: meta, lines }).catch(() => {});
+    const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || '').trim() || this.vk.title, lang: this.tx.info?.lang || this.src?.lang || lines[0]?.lang || null };
+    if (this.tx.state === 'ready') { meta.src = 'yt-transcript'; meta.srcInfo = this.tx.info; }
+    const replace = this.replaceNext; this.replaceNext = false;
+    this.rpc('tx-upsert', { video: meta, lines, replace }).catch(() => {});
   }
+
+  // ---------- YouTube 转写 ----------
+  _wantTranscript() { return /^yt:/.test(this.vk?.key || '') && this.settings.ytTranscript !== false; }
+  _tx() {
+    if (this.tx.state !== 'ready' || this.settings.ytTranscript === false || !this.rec.lines.length) return null;
+    const i = this.tx.info || {};
+    return { lines: this.rec.lines, lang: i.lang, label: `YouTube 转写${i.lang ? '（' + (LANGS[i.lang] || i.lang) + (i.kind === 'asr' ? ' · 自动生成' : i.kind === 'manual' ? ' · 人工字幕' : '') + '）' : ''}` };
+  }
+  /** 取视频自带的转写，整理成句子，替换掉之前记录的屏幕字幕。失败不影响使用：退回读取屏幕字幕 */
+  _loadTranscript() {
+    const key = this.vk.key;
+    this.tx = { state: 'loading', info: null, error: '' };
+    loadYouTubeTranscript({ win: this.doc.defaultView, doc: this.doc, videoId: key.slice(3), settings: this.settings }).then((r) => {
+      if (this.vk?.key !== key) return; // 取的过程中视频换了
+      this.rec.replaceAll(r.lines);
+      this.replaceNext = true;
+      this.tx = { state: 'ready', info: { lang: r.lang, kind: r.kind, name: r.name, words: r.words }, error: '' };
+      this._seedFromLines();
+      this._flush();
+    }).catch((e) => { if (this.vk?.key === key) this.tx = { state: 'failed', info: null, error: e.message || '取不到转写' }; });
+  }
+  /** 侧边栏的"重新整理"：忽略已保存的，重新取一遍 */
+  reloadTranscript() { if (!this._wantTranscript()) return false; this._loadTranscript(); return true; }
 
   // ---------- 侧边栏的指令 ----------
   seek(t, play) { return seekTo(this.doc, t, play); }
@@ -250,6 +288,7 @@ export class Controller {
       translated: this.queue.stats.ok, failed: this.queue.stats.failed, cached: this.cachedHits,
       error: this.error, note: this.note, provider: this.provider || '',
       video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null,
+      tx: { state: this.tx.state, error: this.tx.error, info: this.tx.info },
     };
     const j = JSON.stringify(s);
     if (j !== this.lastStatus) { this.lastStatus = j; this.report(s); }

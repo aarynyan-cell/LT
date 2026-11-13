@@ -137,6 +137,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    ytTranscript: true,
+    // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
     bg: 0.55,
     pos: null,
@@ -157,6 +159,7 @@
     s.engine = ["auto", "llm", "gtx", "chrome"].includes(s.engine) ? s.engine : "auto";
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
+    s.ytTranscript = s.ytTranscript !== false;
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -504,7 +507,10 @@
         h("div", { class: "tabs", role: "tablist" }, ...[["lines", "\u5B57\u5E55"], ["words", "\u5355\u8BCD"], ["saved", `\u6536\u85CF${saved.size ? " " + saved.size : ""}`]].map(([k, t]) => h("button", { class: "tab" + (prefs.tab === k ? " on" : ""), role: "tab", "data-tab": k, onClick: () => setPref({ tab: k }) }, t))),
         h("button", { class: "ico", title: "\u8BBE\u7F6E\uFF08\u7FFB\u8BD1\u5F15\u64CE\u4E0E\u5BC6\u94A5\uFF09", "aria-label": "\u8BBE\u7F6E", onClick: () => chrome.runtime.openOptionsPage() }, "\u2699")
       ),
-      video ? h("div", { class: "sub", title: video.title }, video.title || video.key) : h("div", { class: "sub" }, "\u6CA1\u6709\u6B63\u5728\u8BB0\u5F55\u7684\u89C6\u9891"),
+      video ? h("div", { class: "sub", title: video.title }, video.title || video.key, video.src === "yt-transcript" ? h("span", { class: "srcb", title: "\u5B57\u5E55\u6765\u81EA YouTube \u81EA\u5E26\u7684\u8F6C\u5199\uFF0C\u5DF2\u6574\u7406\u6210\u4E0E\u64AD\u653E\u8FDB\u5EA6\u5BF9\u9F50\u7684\u53E5\u5B50" }, ` \xB7 YouTube \u8F6C\u5199${video.srcInfo?.lang ? "\uFF08" + (LANGS[video.srcInfo.lang] || video.srcInfo.lang) + (video.srcInfo.kind === "asr" ? " \xB7 \u81EA\u52A8\u751F\u6210" : "") + "\uFF09" : ""}`) : null, video.src === "yt-transcript" ? h("button", { class: "btn", id: "retx", style: "margin-left:8px", title: "\u91CD\u65B0\u53D6\u4E00\u904D YouTube \u8F6C\u5199\u5E76\u6574\u7406", onClick: async () => {
+        const r = await sendToTab({ type: "reloadTranscript" });
+        toast(r ? "\u6B63\u5728\u91CD\u65B0\u6574\u7406\u2026" : "\u8BF7\u5148\u5728\u89C6\u9891\u9875\u9762\u5F00\u542F\u5B57\u5E55\u7FFB\u8BD1");
+      } }, "\u27F3 \u91CD\u65B0\u6574\u7406") : null) : h("div", { class: "sub" }, "\u6CA1\u6709\u6B63\u5728\u8BB0\u5F55\u7684\u89C6\u9891"),
       video || prefs.tab === "saved" ? body : h("div", { class: "list" }, h("div", { class: "empty" }, "\u8FD8\u6CA1\u6709\u5B57\u5E55\u3002\u6253\u5F00\u6709\u5B57\u5E55\u7684\u89C6\u9891\uFF0C\u70B9\u63D2\u4EF6\u56FE\u6807\u5F00\u542F\u201C\u5B57\u5E55\u7FFB\u8BD1\u201D\uFF0C\u8FD9\u91CC\u5C31\u4F1A\u5217\u51FA\u8BC6\u522B\u5230\u7684\u5168\u90E8\u5B57\u5E55\u3002")),
       cardView()
     );

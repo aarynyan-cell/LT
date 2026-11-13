@@ -39,6 +39,19 @@
       ],
       "all_frames": true,
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://m.youtube.com/*",
+        "*://www.youtube-nocookie.com/*"
+      ],
+      "js": [
+        "dist/yt-main.js"
+      ],
+      "world": "MAIN",
+      "all_frames": true,
+      "run_at": "document_start"
     }
   ],
   "permissions": [

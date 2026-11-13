@@ -27,7 +27,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   // 转录：内容脚本不能直接用扩展的数据库，经后台读写；写完通知侧边栏刷新
   if (msg?.type === 'tx-get') { getVideo(msg.key).then((video) => reply({ ok: true, video })).catch((e) => reply(err(e))); return true; }
   if (msg?.type === 'tx-upsert') {
-    upsertVideo(msg.video, msg.lines).then(() => { reply({ ok: true }); chrome.runtime.sendMessage({ type: 'tx-updated', key: msg.video.key }).catch(() => {}); }).catch((e) => reply(err(e)));
+    upsertVideo(msg.video, msg.lines, { replace: !!msg.replace }).then(() => { reply({ ok: true }); chrome.runtime.sendMessage({ type: 'tx-updated', key: msg.video.key }).catch(() => {}); }).catch((e) => reply(err(e)));
     return true;
   }
   if (msg?.type === 'status' && sender.tab) {

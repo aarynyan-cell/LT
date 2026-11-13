@@ -113,10 +113,10 @@ export class Overlay {
   }
 
   /** orig：原文；tr：{ [lang]: 译文 }；targets：显示顺序；error：翻译出错时的提示 */
-  show({ orig = '', tr = {}, targets = [], error = '' }) {
+  show({ orig = '', tr = {}, targets = [], error = '', forceOrig = false }) {
     const texts = targets.map((t) => tr[t]).filter(Boolean);
     // 翻译失败又没有译文时，至少把原文显示出来，并亮起红色感叹号，免得用户对着空白不知道发生了什么
-    const showO = (this.opts.showOrig || this.opts.hideSite || (!!error && !texts.length)) && !!orig;
+    const showO = (this.opts.showOrig || this.opts.hideSite || forceOrig || (!!error && !texts.length)) && !!orig;
     this.o.textContent = showO ? orig : ''; this.o.hidden = !showO;
     this.t1.textContent = texts[0] || ''; this.t1.hidden = !texts[0];
     this.t2.textContent = texts[1] || ''; this.t2.hidden = !texts[1];

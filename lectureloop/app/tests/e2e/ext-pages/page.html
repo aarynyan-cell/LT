@@ -23,6 +23,34 @@ if (mode === 'track') {
   const t = document.createElement('track'); t.kind = 'subtitles'; t.srclang = 'fr'; t.label = 'Français'; t.src = '/fr.vtt'; t.default = true; v.append(t);
 }
 const stage = document.getElementById('stage');
+// ---- 仿 YouTube：播放器数据 / 屏幕上滚动的字幕（3 个词一段）/ 转写文字面板 ----
+const YT_DATA = __YT_DATA__;   // 服务端把 captionTracks 嵌在页面里（与真实页面 HTML 一样）
+const VID = new URLSearchParams(location.search).get('v') || 'TESTVID12345';
+if (mode.startsWith('yt')) {
+  const tracksOk = YT_DATA?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+  const tracks = mode === 'ytnone' ? [] : tracksOk.map((t) => ({ ...t, baseUrl: t.baseUrl + (mode === 'ytpanel' ? '&variant=empty' : '') }));
+  const resp = mode === 'ythtml' ? { videoDetails: { videoId: 'STALEVIDEO1' } } : { videoDetails: { videoId: VID, title: 'Test video' }, captions: tracks.length ? { playerCaptionsTracklistRenderer: { captionTracks: tracks } } : undefined };
+  window.ytInitialPlayerResponse = resp;
+  if (mode !== 'ythtml') stage.insertAdjacentHTML('beforeend', '<div id="movie_player"></div>'), (document.getElementById('movie_player').getPlayerResponse = () => resp);
+  // 屏幕上的"原生字幕"：自动字幕那样一个词一个词滚动、三个词一段，句子被切得很碎
+  stage.insertAdjacentHTML('beforeend', '<div class="ytp-caption-window-container"></div>');
+  const nat = stage.querySelector('.ytp-caption-window-container');
+  fetch('/yt-words.json').then((r) => r.json()).then((ws) => {
+    setInterval(() => { const t = v.currentTime; const i = ws.findLastIndex((x) => x.t <= t); const frag = i >= 0 && t - ws[i].t < 1.2 ? ws.slice(Math.floor(i / 3) * 3, Math.floor(i / 3) * 3 + 3).map((x) => x.w).join(' ') : ''; nat.innerHTML = frag ? `<div class="caption-window"><span class="captions-text"><span class="ytp-caption-segment">${frag}</span></span></div>` : ''; }, 100);
+  });
+  if (mode === 'ytpanel') { // 转写文字面板：点按钮后出现每一段（每段 5 个词，开始时间精确到秒）
+    document.body.insertAdjacentHTML('beforeend', '<ytd-video-description-transcript-section-renderer><div><button id="show-tx">Show transcript</button></div></ytd-video-description-transcript-section-renderer>');
+    document.getElementById('show-tx').onclick = async () => {
+      const ws = await (await fetch('/yt-words.json')).json();
+      const panel = document.createElement('ytd-engagement-panel-section-list-renderer');
+      panel.setAttribute('target-id', 'engagement-panel-searchable-transcript');
+      panel.innerHTML = '<div id="visibility-button"><button id="panel-close">x</button></div>';
+      for (let i = 0; i < ws.length; i += 5) { const seg = document.createElement('ytd-transcript-segment-renderer'); const s = Math.floor(ws[i].t); seg.innerHTML = `<div class="segment-timestamp">${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}</div><yt-formatted-string class="segment-text">${ws.slice(i, i + 5).map((x) => x.w).join(' ')}</yt-formatted-string>`; panel.append(seg); }
+      panel.querySelector('#panel-close').onclick = () => { window.__panelClosed = true; panel.remove(); };
+      document.body.append(panel);
+    };
+  }
+}
 function cueNow() { const t = v.currentTime; return CUES.find((c) => t >= c[0] && t < c[1]); }
 if (mode === 'yt') {
   stage.insertAdjacentHTML('beforeend', '<div class="ytp-caption-window-container"></div>');

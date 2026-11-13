@@ -235,7 +235,7 @@ function render() {
     h('div', { class: 'head' },
       h('div', { class: 'tabs', role: 'tablist' }, ...[['lines', '字幕'], ['words', '单词'], ['saved', `收藏${saved.size ? ' ' + saved.size : ''}`]].map(([k, t]) => h('button', { class: 'tab' + (prefs.tab === k ? ' on' : ''), role: 'tab', 'data-tab': k, onClick: () => setPref({ tab: k }) }, t))),
       h('button', { class: 'ico', title: '设置（翻译引擎与密钥）', 'aria-label': '设置', onClick: () => chrome.runtime.openOptionsPage() }, '⚙')),
-    video ? h('div', { class: 'sub', title: video.title }, video.title || video.key) : h('div', { class: 'sub' }, '没有正在记录的视频'),
+    video ? h('div', { class: 'sub', title: video.title }, video.title || video.key, video.src === 'yt-transcript' ? h('span', { class: 'srcb', title: '字幕来自 YouTube 自带的转写，已整理成与播放进度对齐的句子' }, ` · YouTube 转写${video.srcInfo?.lang ? '（' + (LANGS[video.srcInfo.lang] || video.srcInfo.lang) + (video.srcInfo.kind === 'asr' ? ' · 自动生成' : '') + '）' : ''}`) : null, video.src === 'yt-transcript' ? h('button', { class: 'btn', id: 'retx', style: 'margin-left:8px', title: '重新取一遍 YouTube 转写并整理', onClick: async () => { const r = await sendToTab({ type: 'reloadTranscript' }); toast(r ? '正在重新整理…' : '请先在视频页面开启字幕翻译'); } }, '⟳ 重新整理') : null) : h('div', { class: 'sub' }, '没有正在记录的视频'),
     video || prefs.tab === 'saved' ? body : h('div', { class: 'list' }, h('div', { class: 'empty' }, '还没有字幕。打开有字幕的视频，点插件图标开启“字幕翻译”，这里就会列出识别到的全部字幕。')),
     cardView());
   clear(app).append(root);

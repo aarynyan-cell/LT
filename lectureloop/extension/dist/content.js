@@ -11,6 +11,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    ytTranscript: true,
+    // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
     bg: 0.55,
     pos: null,
@@ -31,6 +33,7 @@
     s.engine = ["auto", "llm", "gtx", "chrome"].includes(s.engine) ? s.engine : "auto";
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
+    s.ytTranscript = s.ytTranscript !== false;
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -193,20 +196,64 @@
       }
     };
   }
-  function buildSources(doc, settings, site) {
+  var findLineAt = (lines, t) => {
+    let lo = 0, hi = lines.length - 1, ans = -1;
+    while (lo <= hi) {
+      const mid = lo + hi >> 1;
+      if (lines[mid].start <= t + 0.08) {
+        ans = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return ans >= 0 && t < lines[ans].end ? lines[ans] : null;
+  };
+  function linesCandidate(doc, getTx) {
+    return {
+      id: "transcript",
+      get label() {
+        return getTx()?.label || "\u8F6C\u5F55";
+      },
+      /** 转录已经就绪时，没有当前句就是没有（不要退回去读屏幕字幕，两套断句会互相打架） */
+      exclusive: () => !!getTx()?.lines?.length,
+      read() {
+        const tx = getTx();
+        if (!tx?.lines?.length) return null;
+        const video = pickVideo(doc);
+        if (!video) return null;
+        const l = findLineAt(tx.lines, video.currentTime);
+        return l ? { text: l.text, lang: tx.lang || l.lang || null, video, rolling: false, lineId: l.id } : null;
+      },
+      upcoming(n = 30, ahead = 90) {
+        const tx = getTx(), video = pickVideo(doc);
+        if (!tx?.lines?.length || !video) return [];
+        const t = video.currentTime, out = [];
+        for (let i = 0; i < tx.lines.length && out.length < n; i++) {
+          const l = tx.lines[i];
+          if (l.end < t - 0.5) continue;
+          if (l.start > t + ahead) break;
+          out.push({ text: l.text, start: l.start, prev: i > 0 ? tx.lines[i - 1].text : "" });
+        }
+        return out;
+      }
+    };
+  }
+  function buildSources(doc, settings, site, getTx = null) {
     const saved = /* @__PURE__ */ new Map();
     const list = [];
     const picked = (settings.pickers?.[site] || []).filter(Boolean);
     if (picked.length) list.push(domCandidate({ id: "picker", label: "\u624B\u52A8\u9009\u53D6\u7684\u5B57\u5E55\u4F4D\u7F6E", sel: picked.join(", ") }, doc));
+    const tr = getTx ? linesCandidate(doc, getTx) : null;
+    if (tr) list.push(tr);
     for (const a of ADAPTERS) if (a.host.test(site)) list.push(domCandidate(a, doc));
     const tt = textTrackCandidate(doc, settings, saved);
     list.push(tt);
-    return { list, textTrack: tt, hideSelectors: list.filter((c) => c.hide).map((c) => c.hide) };
+    return { list, textTrack: tt, transcript: tr, hideSelectors: list.filter((c) => c.hide).map((c) => c.hide) };
   }
   function readFirst(sources) {
     for (const c of sources.list) {
       const r = c.read();
       if (r?.text) return { id: c.id, label: c.label, ...r };
+      if (c.exclusive?.()) return null;
     }
     return null;
   }
@@ -291,6 +338,13 @@
       this.lines = mergeLines(this.lines, incoming);
       for (const l of this.lines) if (!before.has(l.id) || before.get(l.id) !== l.end + "|" + l.text) this.dirty.add(l.id);
     }
+    /** 用整份新的转录替换（YouTube 转写整理好之后）：旧的网站字幕记录作废，已有的译文按文字沿用 */
+    replaceAll(lines) {
+      const old = new Map(this.lines.filter((l) => l.tr).map((l) => [norm(l.text), l.tr]));
+      this.lines = mergeLines([], lines.map((l) => ({ ...l, tr: old.get(norm(l.text)) || l.tr })));
+      this.dirty = new Set(this.lines.map((l) => l.id));
+      this.loadedTrack = "replaced";
+    }
     /** 网站字幕稳定下来的一句：返回它的 id（已有的就复用） */
     observe(text, t, lang) {
       const i = findMatch(this.lines, text, t);
@@ -371,6 +425,385 @@
     const params = [...u.searchParams].filter(([k]) => !DROP.test(k)).sort(([a], [b]) => a < b ? -1 : 1);
     const q = params.length ? "?" + params.map(([k, v]) => `${k}=${v}`).join("&") : "";
     return { key: `u:${host}${u.pathname.replace(/\/+$/, "")}${q}`, site: host, url: u.origin + u.pathname + q };
+  }
+
+  // ../extension/src/core/captions.js
+  var ENT = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  var decodeEntities = (s) => String(s).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === "#") {
+      const n = e[1].toLowerCase() === "x" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      try {
+        return String.fromCodePoint(n);
+      } catch {
+        return m;
+      }
+    }
+    return ENT[e.toLowerCase()] ?? m;
+  });
+  var decode2 = (s) => decodeEntities(decodeEntities(s)).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  function parseJson3(data) {
+    const cues = [];
+    for (const ev of data?.events || []) {
+      if (!Array.isArray(ev.segs)) continue;
+      const text = ev.segs.map((s) => s.utf8 || "").join("").replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      const start = (ev.tStartMs || 0) / 1e3, end = start + (ev.dDurationMs || 0) / 1e3;
+      const timed = ev.segs.some((s) => typeof s.tOffsetMs === "number" && s.tOffsetMs > 0);
+      const cue = { start, end: Math.max(end, start + 0.2), text };
+      if (timed) {
+        cue.words = [];
+        for (const s of ev.segs) {
+          const toks = String(s.utf8 || "").trim().split(/\s+/).filter(Boolean);
+          toks.forEach((w, i) => cue.words.push({ w, t: start + ((s.tOffsetMs || 0) + i * 120) / 1e3 }));
+        }
+      }
+      cues.push(cue);
+    }
+    return cues;
+  }
+  function parseXml(xml) {
+    const cues = [];
+    const s = String(xml || "");
+    if (/<p\s[^>]*\bt="/.test(s)) {
+      for (const m of s.matchAll(/<p\s+([^>]*)>([\s\S]*?)<\/p>/g)) {
+        const at = (k) => {
+          const r = new RegExp(`\\b${k}="(\\d+)"`).exec(m[1]);
+          return r ? +r[1] : null;
+        };
+        const t0 = at("t"), d = at("d");
+        if (t0 == null) continue;
+        const start = t0 / 1e3;
+        const segs = [...m[2].matchAll(/<s(?:\s+([^>]*))?>([\s\S]*?)<\/s>/g)];
+        const text = decode2(segs.length ? segs.map((x) => x[2]).join("") : m[2]);
+        if (!text) continue;
+        const cue = { start, end: start + (d || 0) / 1e3 || start + 2, text };
+        if (segs.length > 1) {
+          cue.words = [];
+          for (const x of segs) {
+            const off = /\bt="(\d+)"/.exec(x[1] || "");
+            const w = decode2(x[2]);
+            if (w) cue.words.push({ w, t: start + (off ? +off[1] : 0) / 1e3 });
+          }
+        }
+        cues.push(cue);
+      }
+      return cues;
+    }
+    for (const m of s.matchAll(/<text\s+([^>]*)>([\s\S]*?)<\/text>/g)) {
+      const st = /\bstart="([\d.]+)"/.exec(m[1]), du = /\bdur="([\d.]+)"/.exec(m[1]);
+      if (!st) continue;
+      const text = decode2(m[2]);
+      if (!text) continue;
+      const start = +st[1];
+      cues.push({ start, end: start + (du ? +du[1] : 2), text });
+    }
+    return cues;
+  }
+  function cuesFromPanel(items) {
+    const rows = items.filter((x) => Number.isFinite(x.t) && x.text?.trim()).sort((a, b) => a.t - b.t);
+    return rows.map((r, i) => ({ start: r.t, end: Math.max(r.t + 0.5, rows[i + 1]?.t ?? r.t + 5), text: r.text.replace(/\s+/g, " ").trim() }));
+  }
+  function parseTimestamp(s) {
+    const p = String(s || "").trim().split(":").map(Number);
+    if (!p.length || p.some((x) => !Number.isFinite(x))) return NaN;
+    return p.reduce((a, x) => a * 60 + x, 0);
+  }
+  function extractCaptionTracksFromHtml(html) {
+    const i = String(html).indexOf('"captionTracks":');
+    if (i < 0) return [];
+    const a = html.indexOf("[", i);
+    if (a < 0) return [];
+    let depth = 0, inStr = false, esc = false;
+    for (let k = a; k < html.length; k++) {
+      const c = html[k];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === "[") depth++;
+      else if (c === "]" && --depth === 0) {
+        try {
+          return JSON.parse(html.slice(a, k + 1));
+        } catch {
+          return [];
+        }
+      }
+    }
+    return [];
+  }
+  var trackName = (t) => typeof t.name === "string" ? t.name : t.name?.simpleText || t.name?.runs?.map((r) => r.text).join("") || "";
+  function pickTrack(tracks, { source = "auto" } = {}) {
+    const list = (tracks || []).filter((t) => t?.baseUrl && t.languageCode);
+    const lang = (t) => t.languageCode.slice(0, 2).toLowerCase();
+    const pool = source !== "auto" ? list.filter((t) => lang(t) === source) : list;
+    if (!pool.length) return null;
+    const asr = pool.find((t) => t.kind === "asr");
+    const manual = pool.filter((t) => t.kind !== "asr");
+    const pick = asr && manual.find((t) => lang(t) === lang(asr)) || asr || manual[0];
+    return { track: pick, lang: lang(pick), kind: pick.kind === "asr" ? "asr" : "manual", name: trackName(pick) };
+  }
+  function withFormat(url, fmt) {
+    const u = new URL(url);
+    if (fmt) u.searchParams.set("fmt", fmt);
+    else u.searchParams.delete("fmt");
+    return u.toString();
+  }
+  var isYouTubeUrl = (url) => {
+    try {
+      const u = new URL(url);
+      return /^https?:$/.test(u.protocol) && /(^|\.)youtube(-nocookie)?\.com$/.test(u.hostname);
+    } catch {
+      return false;
+    }
+  };
+
+  // ../extension/src/core/segment.js
+  var TERMINAL = /[.!?…。！？]["'”’»)\]]*$/;
+  var COMMA = /[,;:，；：、]["'”’)\]]*$/;
+  var ABBR = /* @__PURE__ */ new Set(["mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "m", "mme", "mlle", "mm", "etc", "cf", "no", "p", "fig"]);
+  var BOUNDARY = /* @__PURE__ */ new Set(["and", "so", "but", "because", "which", "where", "then", "okay", "ok", "now", "if", "while", "however", "also", "right", "alright", "et", "mais", "donc", "parce", "alors", "puis", "maintenant", "ensuite", "sinon", "quand", "comme", "car"]);
+  var NOISE = /^(\[[^\]]*\]|\([^)]*\)|♪+|♫+|[-–—]+)$/;
+  var isCjk = (lang) => lang === "zh" || lang === "ja";
+  var bare = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, "");
+  var wordDur = (w) => Math.min(0.9, 0.12 + 0.065 * [...w].length);
+  function cuesToWords(cues, lang = "en") {
+    const words = [];
+    const cjk = isCjk(lang);
+    let prevEnd = null;
+    const sorted = [...cues].sort((a, b) => a.start - b.start);
+    for (const cue of sorted) {
+      let toks;
+      if (cue.words?.length) toks = cue.words.map((x) => ({ w: x.w, t: x.t, timed: true }));
+      else {
+        const parts = cjk ? [...cue.text.replace(/\s+/g, "")] : cue.text.split(/\s+/).filter(Boolean);
+        const total = parts.reduce((s, p) => s + [...p].length + 1, 0) || 1;
+        let acc = 0;
+        toks = parts.map((w) => {
+          const t = cue.start + (cue.end - cue.start) * acc / total;
+          acc += [...w].length + 1;
+          return { w, t, timed: false };
+        });
+      }
+      toks.forEach((x, i) => {
+        if (NOISE.test(x.w)) return;
+        const prev = words.at(-1);
+        let gap;
+        if (x.timed && prev && prev.timed) gap = Math.max(0, x.t - (prev.t + wordDur(prev.w)));
+        else if (i === 0 && prevEnd != null) gap = Math.max(0, cue.start - prevEnd);
+        else gap = 0;
+        words.push({ w: x.w, t: x.t, gap, timed: x.timed });
+      });
+      prevEnd = cue.end;
+    }
+    return dropRepeats(words);
+  }
+  function dropRepeats(words) {
+    const out = [];
+    for (const w of words) {
+      out.push(w);
+      for (let k = Math.min(12, Math.floor(out.length / 2)); k >= 3; k--) {
+        let same = true;
+        for (let j = 1; j <= k; j++) if (bare(out[out.length - j].w) !== bare(out[out.length - j - k].w)) {
+          same = false;
+          break;
+        }
+        if (same) {
+          out.length -= k;
+          break;
+        }
+      }
+    }
+    return out;
+  }
+  var isAbbrev = (w) => {
+    const b = bare(w.replace(/\.+$/, ""));
+    return b.length <= 4 && ABBR.has(b) && /\.$/.test(w);
+  };
+  var endsSentence = (w) => TERMINAL.test(w) && !isAbbrev(w) && !/^\d+[.,]\d*$/.test(w);
+  function segmentSentences(words, { lang = "en", maxWords = 26, maxSec = 9, minWords = 3 } = {}) {
+    if (!words.length) return [];
+    const cjk = isCjk(lang);
+    const maxW = cjk ? maxWords * 2 : maxWords, minW = cjk ? minWords * 2 : minWords, five = cjk ? 10 : 5;
+    const punctuated = words.filter((x) => endsSentence(x.w)).length >= Math.max(2, words.length / 60);
+    const chunks = [];
+    let cur = [];
+    words.forEach((x, i) => {
+      cur.push(x);
+      const next = words[i + 1];
+      const brk = !next || endsSentence(x.w) && (cur.length >= minW || (next.gap || 0) > 0.8) || !punctuated && (next.gap >= 0.5 && cur.length >= five || next.gap >= 0.7 && cur.length >= minW || next.gap >= 1.2 && cur.length >= 2);
+      if (brk) {
+        chunks.push(cur);
+        cur = [];
+      }
+    });
+    const split = (c) => {
+      const dur = c.at(-1).t - c[0].t;
+      if (c.length <= maxW && dur <= maxSec) return [c];
+      let best = -1, bestScore = -Infinity;
+      for (let i = minW; i <= c.length - minW; i++) {
+        const prev = c[i - 1].w, nx = c[i];
+        const score = (nx.gap || 0) * 2 + (COMMA.test(prev) ? 0.9 : 0) + (BOUNDARY.has(bare(nx.w)) ? 0.5 : 0) - Math.abs(i - c.length / 2) * 0.03;
+        if (score > bestScore) {
+          bestScore = score;
+          best = i;
+        }
+      }
+      if (best < 0) best = Math.floor(c.length / 2);
+      return [...split(c.slice(0, best)), ...split(c.slice(best))];
+    };
+    let parts = chunks.flatMap(split);
+    const fits = (a, b) => a.length + b.length <= maxW && b.at(-1).t - a[0].t <= maxSec;
+    for (let i = 0; i < parts.length; ) {
+      const c = parts[i];
+      if (c.length >= minW || parts.length === 1) {
+        i++;
+        continue;
+      }
+      const prev = parts[i - 1], next = parts[i + 1];
+      const gp = prev ? c[0].gap || 0 : Infinity, gn = next ? next[0].gap || 0 : Infinity;
+      if (prev && gp <= gn && fits(prev, c)) {
+        parts[i - 1] = [...prev, ...c];
+        parts.splice(i, 1);
+      } else if (next && fits(c, next)) {
+        parts[i] = [...c, ...next];
+        parts.splice(i + 1, 1);
+      } else i++;
+    }
+    return parts.map((c, i) => {
+      const nextStart = parts[i + 1]?.[0].t;
+      const last = c.at(-1);
+      let end = last.t + wordDur(last.w) + 0.25;
+      if (nextStart != null) end = Math.min(end, nextStart);
+      const start = c[0].t;
+      end = Math.max(end, start + 0.6);
+      return { start, end, text: finish(c.map((x) => x.w), cjk, lang) };
+    });
+  }
+  function finish(ws, cjk, lang) {
+    let t = cjk ? ws.join("") : ws.join(" ");
+    t = t.replace(/\s+([,.;:!?…])/g, "$1").replace(/\s{2,}/g, " ").trim();
+    if (lang === "fr") t = t.replace(new RegExp("(\\p{L})\\s*([?!])", "gu"), "$1 $2");
+    if (!cjk) t = t.charAt(0).toUpperCase() + t.slice(1);
+    if (!TERMINAL.test(t)) t += cjk ? "\u3002" : ".";
+    return t;
+  }
+  var cuesToSentences = (cues, lang, opts) => segmentSentences(cuesToWords(cues, lang), { lang, ...opts });
+
+  // ../extension/src/core/langs.js
+  var LANGS = { zh: "\u4E2D\u6587", en: "\u82F1\u8BED", fr: "\u6CD5\u8BED" };
+  var SOURCE_OPTIONS = { auto: "\u81EA\u52A8\u5224\u65AD", ...LANGS };
+  var FR = new Set(`le la les un une des du de au aux et est sont pas ne que qui quoi dans pour avec sur mais ou o\xF9 donc car ce cet cette ces je tu il elle nous vous ils elles on mon ma mes ton ta tes son sa ses notre votre leur leurs oui non tr\xE8s bien \xEAtre avoir fait faire suis es \xEAtes sommes ai as avons avez ont merci bonjour bonsoir salut monsieur madame mademoiselle alors comme aussi encore toujours jamais rien tout tous toute plus moins peu beaucoup d\xE9j\xE0 jusqu aujourd hui chez sans sous entre vers depuis pendant \xE7a ici l\xE0 voil\xE0 allez viens vas veux peux dois faut puis parce quand comment pourquoi quel quelle quels`.split(/\s+/));
+  var EN = new Set(`the a an and is are was were not no that this these those with for you i he she we they it my your his her our their yes very be been being have has had do does did of to in on at but or so if what who how why when where can could will would just there here from by as about up out get got go going know think want like see say okay hello thanks thank please sorry don't doesn't didn't can't won't isn't aren't it's i'm you're we're they're that's what's let's gonna wanna gotta yeah nope`.split(/\s+/));
+  var ELISION = /^(l|d|j|n|qu|c|m|t|s|jusqu|lorsqu|puisqu)['’]/i;
+  function detectLang(text) {
+    const s = String(text || "").trim();
+    if (!s) return null;
+    const han = (s.match(/[㐀-鿿豈-﫿]/g) || []).length;
+    const letters = (s.match(new RegExp("\\p{L}", "gu")) || []).length;
+    if (!letters) return null;
+    if (han / letters > 0.3) return "zh";
+    let fr = 0, en = 0;
+    for (const raw of s.toLowerCase().split(/[^\p{L}'’]+/u)) {
+      if (!raw) continue;
+      if (ELISION.test(raw)) fr += 1;
+      const w = raw.replace(/^['’]+|['’]+$/g, "");
+      if (FR.has(w)) fr += 1;
+      if (EN.has(raw) || EN.has(w)) en += 1;
+    }
+    fr += (s.match(/[éèêàùûçœîïôâë]/gi) || []).length * 0.7;
+    if (fr === 0 && en === 0) return null;
+    return fr > en ? "fr" : en > fr ? "en" : null;
+  }
+
+  // ../extension/src/core/yt.js
+  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function askPlayerData(win, videoId, timeout = 1500) {
+    return new Promise((resolve) => {
+      const id = Math.random().toString(36).slice(2);
+      const done = (v) => {
+        win.removeEventListener("message", on);
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const on = (e) => {
+        if (e.source === win && e.data?.type === "lectureloop:yt-data" && e.data.id === id) done(e.data.payload);
+      };
+      const timer = setTimeout(() => done(null), timeout);
+      win.addEventListener("message", on);
+      win.postMessage({ type: "lectureloop:yt-request", id, videoId }, "*");
+    });
+  }
+  async function fetchCues(baseUrl, fetchFn) {
+    for (const fmt of ["json3", null]) {
+      let text = "";
+      try {
+        const r = await fetchFn(withFormat(baseUrl, fmt), { credentials: "include" });
+        if (!r.ok) continue;
+        text = await r.text();
+      } catch {
+        continue;
+      }
+      if (!text.trim()) continue;
+      let cues = [];
+      try {
+        cues = parseJson3(JSON.parse(text));
+      } catch {
+        cues = parseXml(text);
+      }
+      if (cues.length) return cues;
+    }
+    return [];
+  }
+  async function scrapePanel(doc, { wait = 6e3 } = {}) {
+    const SEG = "ytd-transcript-segment-renderer";
+    let opened = false;
+    if (!doc.querySelector(SEG)) {
+      const btn = doc.querySelector("ytd-video-description-transcript-section-renderer button, ytd-video-description-transcript-section-renderer ytd-button-renderer button");
+      if (!btn) return [];
+      btn.click();
+      opened = true;
+      for (let t = 0; t < wait && !doc.querySelector(SEG); t += 200) await sleep(200);
+    }
+    const rows = [...doc.querySelectorAll(SEG)].map((el) => ({
+      t: parseTimestamp(el.querySelector(".segment-timestamp")?.textContent),
+      text: el.querySelector(".segment-text")?.textContent || ""
+    }));
+    if (opened) doc.querySelector('ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"] #visibility-button button')?.click();
+    return cuesFromPanel(rows);
+  }
+  async function loadYouTubeTranscript({ win, doc, videoId, settings = {}, fetchFn = (u, i) => win.fetch(u, i) }) {
+    const origin = win.location.origin;
+    let tracks = [];
+    const data = await askPlayerData(win, videoId);
+    if (data?.videoId === videoId && data.tracks?.length) tracks = data.tracks;
+    if (!tracks.length) {
+      try {
+        const r = await fetchFn(`${origin}/watch?v=${encodeURIComponent(videoId)}`, { credentials: "include" });
+        if (r.ok) tracks = extractCaptionTracksFromHtml(await r.text());
+      } catch {
+      }
+    }
+    tracks = tracks.map((t) => ({ ...t, baseUrl: t.baseUrl && new URL(t.baseUrl, origin).toString() })).filter((t) => isYouTubeUrl(t.baseUrl));
+    const choice = pickTrack(tracks, { source: settings.source || "auto" });
+    let cues = [], kind = choice?.kind, lang = choice?.lang, name = choice?.name || "";
+    if (choice) cues = await fetchCues(choice.track.baseUrl, fetchFn);
+    if (!cues.length) {
+      cues = await scrapePanel(doc);
+      if (cues.length) {
+        kind = "panel";
+        name = "\u8F6C\u5199\u6587\u5B57\u9762\u677F";
+        lang = settings.source && settings.source !== "auto" ? settings.source : null;
+      }
+    }
+    if (!cues.length) throw new Error(tracks.length ? "\u5B57\u5E55\u6570\u636E\u53D6\u4E0D\u5230\uFF08YouTube \u8FD4\u56DE\u4E86\u7A7A\u5185\u5BB9\uFF09" : "\u8FD9\u4E2A\u89C6\u9891\u6CA1\u6709\u53EF\u7528\u7684\u8F6C\u5199\u6216\u5B57\u5E55");
+    lang ||= detectLang(cues.slice(0, 40).map((c) => c.text).join(" ")) || "en";
+    const sentences = cuesToSentences(cues, lang);
+    if (!sentences.length) throw new Error("\u8F6C\u5199\u91CC\u6CA1\u6709\u53EF\u7528\u7684\u6587\u5B57");
+    const lines = sentences.map((s) => ({ id: `t${Math.round(s.start * 1e3)}`, start: s.start, end: s.end, text: s.text, lang }));
+    return { lines, lang, kind, name, words: cues.reduce((n, c) => n + (c.words?.length || c.text.split(/\s+/).length), 0) };
   }
 
   // ../extension/src/core/stabilizer.js
@@ -680,9 +1113,9 @@
       this.box.style.top = p.by * 100 + "%";
     }
     /** orig：原文；tr：{ [lang]: 译文 }；targets：显示顺序；error：翻译出错时的提示 */
-    show({ orig = "", tr = {}, targets = [], error = "" }) {
+    show({ orig = "", tr = {}, targets = [], error = "", forceOrig = false }) {
       const texts = targets.map((t) => tr[t]).filter(Boolean);
-      const showO = (this.opts.showOrig || this.opts.hideSite || !!error && !texts.length) && !!orig;
+      const showO = (this.opts.showOrig || this.opts.hideSite || forceOrig || !!error && !texts.length) && !!orig;
       this.o.textContent = showO ? orig : "";
       this.o.hidden = !showO;
       this.t1.textContent = texts[0] || "";
@@ -706,32 +1139,6 @@
     }
   };
 
-  // ../extension/src/core/langs.js
-  var LANGS = { zh: "\u4E2D\u6587", en: "\u82F1\u8BED", fr: "\u6CD5\u8BED" };
-  var SOURCE_OPTIONS = { auto: "\u81EA\u52A8\u5224\u65AD", ...LANGS };
-  var FR = new Set(`le la les un une des du de au aux et est sont pas ne que qui quoi dans pour avec sur mais ou o\xF9 donc car ce cet cette ces je tu il elle nous vous ils elles on mon ma mes ton ta tes son sa ses notre votre leur leurs oui non tr\xE8s bien \xEAtre avoir fait faire suis es \xEAtes sommes ai as avons avez ont merci bonjour bonsoir salut monsieur madame mademoiselle alors comme aussi encore toujours jamais rien tout tous toute plus moins peu beaucoup d\xE9j\xE0 jusqu aujourd hui chez sans sous entre vers depuis pendant \xE7a ici l\xE0 voil\xE0 allez viens vas veux peux dois faut puis parce quand comment pourquoi quel quelle quels`.split(/\s+/));
-  var EN = new Set(`the a an and is are was were not no that this these those with for you i he she we they it my your his her our their yes very be been being have has had do does did of to in on at but or so if what who how why when where can could will would just there here from by as about up out get got go going know think want like see say okay hello thanks thank please sorry don't doesn't didn't can't won't isn't aren't it's i'm you're we're they're that's what's let's gonna wanna gotta yeah nope`.split(/\s+/));
-  var ELISION = /^(l|d|j|n|qu|c|m|t|s|jusqu|lorsqu|puisqu)['’]/i;
-  function detectLang(text) {
-    const s = String(text || "").trim();
-    if (!s) return null;
-    const han = (s.match(/[㐀-鿿豈-﫿]/g) || []).length;
-    const letters = (s.match(new RegExp("\\p{L}", "gu")) || []).length;
-    if (!letters) return null;
-    if (han / letters > 0.3) return "zh";
-    let fr = 0, en = 0;
-    for (const raw of s.toLowerCase().split(/[^\p{L}'’]+/u)) {
-      if (!raw) continue;
-      if (ELISION.test(raw)) fr += 1;
-      const w = raw.replace(/^['’]+|['’]+$/g, "");
-      if (FR.has(w)) fr += 1;
-      if (EN.has(raw) || EN.has(w)) en += 1;
-    }
-    fr += (s.match(/[éèêàùûçœîïôâë]/gi) || []).length * 0.7;
-    if (fr === 0 && en === 0) return null;
-    return fr > en ? "fr" : en > fr ? "en" : null;
-  }
-
   // ../extension/src/core/controller.js
   var TICK_MS = 150;
   var PREFETCH_MS = 1500;
@@ -750,6 +1157,8 @@
       this.saveSettings = saveSettings2;
       this.report = report;
       this.rpc = rpc;
+      this.tx = { state: "idle", info: null, error: "" };
+      this.replaceNext = false;
       this.rec = new Recorder();
       this.vk = null;
       this.ready = false;
@@ -831,6 +1240,10 @@
         this.queue.clear();
         if (this.cur) this._translate(this.cur);
       }
+      if (prev.ytTranscript !== s.ytTranscript || prev.source !== s.source) {
+        this.tx = { state: "idle", info: null, error: "" };
+        if (this._wantTranscript()) this._loadTranscript();
+      }
       if (prev.targets.join() !== s.targets.join()) this._seedFromLines();
       this._render();
     }
@@ -839,7 +1252,7 @@
       return { fontScale: s.fontScale, bg: s.bg, showOrig: s.showOrig, hideSite: s.hideSite, pos: s.pos };
     }
     _rebuild() {
-      this.sources = buildSources(this.doc, this.settings, this.site);
+      this.sources = buildSources(this.doc, this.settings, this.site, () => this._tx());
       this.overlay.setOptions(this._ov());
       this.styleEl?.remove();
       this.styleEl = null;
@@ -898,9 +1311,10 @@
         this.curLineId = "";
         this._render();
       }
+      if (found?.lineId) this.curLineId = found.lineId;
       if (this.ready) {
-        this._loadTrack();
-        if (this.curLineId) this.rec.touch(this.curLineId, this._now());
+        if (this.tx.state !== "ready") this._loadTrack();
+        if (this.curLineId && found?.id !== "transcript") this.rec.touch(this.curLineId, this._now());
       }
       this._status();
     }
@@ -926,12 +1340,13 @@
       }
       const { source, targets } = this._lineInfo(text);
       const tr = targets.length ? this.queue.peek(text, source, targets) || {} : {};
-      this.overlay.show({ orig: text, tr, targets: this.settings.targets, error: this.error });
+      const forceOrig = this.src?.id === "transcript" && !this.doc.querySelector(".ytp-caption-window-container .ytp-caption-segment, .player-timedtext-text-container");
+      this.overlay.show({ orig: text, tr, targets: this.settings.targets, error: this.error, forceOrig });
     }
     /** 视频字幕轨道整条载入时，提前翻译接下来约 90 秒的字幕，播放到时译文已经在缓存里 */
     _prefetch() {
-      if (!this.on || this.doc.hidden || this.src?.id !== "texttrack") return;
-      const up = this.sources.textTrack.upcoming(24, 90);
+      if (!this.on || this.doc.hidden || this.src?.id !== "texttrack" && this.src?.id !== "transcript") return;
+      const up = (this.src.id === "transcript" ? this.sources.transcript : this.sources.textTrack).upcoming(24, 90);
       for (const c of up) {
         const { source, targets } = this._lineInfo(c.text);
         if (!targets.length) continue;
@@ -960,11 +1375,13 @@
       const key = k.key;
       this.rpc("tx-get", { key }).then((r) => {
         if (this.vk?.key !== key) return;
-        if (r?.video?.lines?.length) {
-          this.rec.load(r.video.lines);
-          this._seedFromLines();
-        }
+        const v = r?.video;
+        if (v?.lines?.length) this.rec.load(v.lines);
+        if (v?.src === "yt-transcript" && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: "ready", info: v.srcInfo || null, error: "" };
+        else this.tx = { state: "idle", info: null, error: "" };
+        this._seedFromLines();
         this.ready = true;
+        if (this._wantTranscript() && this.tx.state !== "ready") this._loadTranscript();
       }).catch(() => {
         this.ready = true;
       });
@@ -989,7 +1406,7 @@
     }
     /** 一句稳定下来：记进转录，并记下它的 id（侧边栏据此高亮当前句） */
     _record(text) {
-      if (!this.vk) return;
+      if (!this.vk || this.tx.state === "ready") return;
       const lang = this.src?.lang || this._lineInfo(text).source;
       this.curLineId = this.rec.observe(text, Math.max(0, this._now() - 0.15), lang);
       this._flushSoon();
@@ -1002,9 +1419,45 @@
       this.flushTimer = 0;
       if (!this.vk || !this.rec.hasDirty) return;
       const lines = this.rec.take();
-      const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || "").trim() || this.vk.title, lang: this.src?.lang || lines[0]?.lang || null };
-      this.rpc("tx-upsert", { video: meta, lines }).catch(() => {
+      const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || "").trim() || this.vk.title, lang: this.tx.info?.lang || this.src?.lang || lines[0]?.lang || null };
+      if (this.tx.state === "ready") {
+        meta.src = "yt-transcript";
+        meta.srcInfo = this.tx.info;
+      }
+      const replace = this.replaceNext;
+      this.replaceNext = false;
+      this.rpc("tx-upsert", { video: meta, lines, replace }).catch(() => {
       });
+    }
+    // ---------- YouTube 转写 ----------
+    _wantTranscript() {
+      return /^yt:/.test(this.vk?.key || "") && this.settings.ytTranscript !== false;
+    }
+    _tx() {
+      if (this.tx.state !== "ready" || this.settings.ytTranscript === false || !this.rec.lines.length) return null;
+      const i = this.tx.info || {};
+      return { lines: this.rec.lines, lang: i.lang, label: `YouTube \u8F6C\u5199${i.lang ? "\uFF08" + (LANGS[i.lang] || i.lang) + (i.kind === "asr" ? " \xB7 \u81EA\u52A8\u751F\u6210" : i.kind === "manual" ? " \xB7 \u4EBA\u5DE5\u5B57\u5E55" : "") + "\uFF09" : ""}` };
+    }
+    /** 取视频自带的转写，整理成句子，替换掉之前记录的屏幕字幕。失败不影响使用：退回读取屏幕字幕 */
+    _loadTranscript() {
+      const key = this.vk.key;
+      this.tx = { state: "loading", info: null, error: "" };
+      loadYouTubeTranscript({ win: this.doc.defaultView, doc: this.doc, videoId: key.slice(3), settings: this.settings }).then((r) => {
+        if (this.vk?.key !== key) return;
+        this.rec.replaceAll(r.lines);
+        this.replaceNext = true;
+        this.tx = { state: "ready", info: { lang: r.lang, kind: r.kind, name: r.name, words: r.words }, error: "" };
+        this._seedFromLines();
+        this._flush();
+      }).catch((e) => {
+        if (this.vk?.key === key) this.tx = { state: "failed", info: null, error: e.message || "\u53D6\u4E0D\u5230\u8F6C\u5199" };
+      });
+    }
+    /** 侧边栏的"重新整理"：忽略已保存的，重新取一遍 */
+    reloadTranscript() {
+      if (!this._wantTranscript()) return false;
+      this._loadTranscript();
+      return true;
     }
     // ---------- 侧边栏的指令 ----------
     seek(t, play) {
@@ -1062,7 +1515,8 @@
         error: this.error,
         note: this.note,
         provider: this.provider || "",
-        video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null
+        video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null,
+        tx: { state: this.tx.state, error: this.tx.error, info: this.tx.info }
       };
       const j = JSON.stringify(s);
       if (j !== this.lastStatus) {
@@ -1276,6 +1730,8 @@
         if (ctl.setLoop(msg.start, msg.end)) reply({ ok: true });
       } else if (msg?.type === "loopClear") {
         ctl.clearLoop();
+      } else if (msg?.type === "reloadTranscript") {
+        if (ctl.on && ctl.reloadTranscript()) reply({ ok: true });
       } else if (msg?.type === "translateAll") {
         if (ctl.on && ctl.rec.lines.length) reply({ n: ctl.translateAll() });
       } else if (msg?.type === "pick") {

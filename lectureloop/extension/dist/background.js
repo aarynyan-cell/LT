@@ -11,6 +11,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    ytTranscript: true,
+    // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
     bg: 0.55,
     pos: null,
@@ -31,6 +33,7 @@
     s.engine = ["auto", "llm", "gtx", "chrome"].includes(s.engine) ? s.engine : "auto";
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
+    s.ytTranscript = s.ytTranscript !== false;
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -547,7 +550,7 @@ ${JSON.stringify(schema)}`;
     });
   }
   var getVideo = (key) => run("videos", "readonly", (s) => s.get(key));
-  async function upsertVideo(meta, lines) {
+  async function upsertVideo(meta, lines, { replace = false } = {}) {
     const d = await db();
     return new Promise((res, rej) => {
       const t = d.transaction("videos", "readwrite");
@@ -555,7 +558,7 @@ ${JSON.stringify(schema)}`;
       const g = s.get(meta.key);
       g.onsuccess = () => {
         const cur = g.result || { key: meta.key, lines: [] };
-        const next = { ...cur, ...meta, lines: mergeLines(cur.lines, lines), updated: Date.now() };
+        const next = { ...cur, ...meta, lines: mergeLines(replace ? [] : cur.lines, lines), updated: Date.now() };
         s.put(next);
       };
       t.oncomplete = () => res(true);
@@ -621,7 +624,7 @@ ${JSON.stringify(schema)}`;
       return true;
     }
     if (msg?.type === "tx-upsert") {
-      upsertVideo(msg.video, msg.lines).then(() => {
+      upsertVideo(msg.video, msg.lines, { replace: !!msg.replace }).then(() => {
         reply({ ok: true });
         chrome.runtime.sendMessage({ type: "tx-updated", key: msg.video.key }).catch(() => {
         });

@@ -88,6 +88,7 @@ async function main() {
     else if (msg?.type === 'seek') { if (ctl.seek(msg.t, msg.play)) reply({ ok: true }); }
     else if (msg?.type === 'loop') { if (ctl.setLoop(msg.start, msg.end)) reply({ ok: true }); }
     else if (msg?.type === 'loopClear') { ctl.clearLoop(); }
+    else if (msg?.type === 'reloadTranscript') { if (ctl.on && ctl.reloadTranscript()) reply({ ok: true }); }
     else if (msg?.type === 'translateAll') { if (ctl.on && ctl.rec.lines.length) reply({ n: ctl.translateAll() }); }
     else if (msg?.type === 'pick') {
       if (!shouldPick()) return;

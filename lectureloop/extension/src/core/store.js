@@ -36,7 +36,7 @@ export const getVideo = (key) => run('videos', 'readonly', (s) => s.get(key));
 export const listVideos = () => run('videos', 'readonly', (s) => s.getAll());
 export const deleteVideo = (key) => run('videos', 'readwrite', (s) => s.delete(key));
 /** 读 → 合并 → 写，在同一个事务里，不会丢并发写入 */
-export async function upsertVideo(meta, lines) {
+export async function upsertVideo(meta, lines, { replace = false } = {}) {
   const d = await db();
   return new Promise((res, rej) => {
     const t = d.transaction('videos', 'readwrite');
@@ -44,7 +44,7 @@ export async function upsertVideo(meta, lines) {
     const g = s.get(meta.key);
     g.onsuccess = () => {
       const cur = g.result || { key: meta.key, lines: [] };
-      const next = { ...cur, ...meta, lines: mergeLines(cur.lines, lines), updated: Date.now() };
+      const next = { ...cur, ...meta, lines: mergeLines(replace ? [] : cur.lines, lines), updated: Date.now() };
       s.put(next);
     };
     t.oncomplete = () => res(true);

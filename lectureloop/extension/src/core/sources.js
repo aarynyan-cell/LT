@@ -99,16 +99,54 @@ function textTrackCandidate(doc, settings, saved) {
   };
 }
 
-/** 候选来源（按优先级）。picked 是用户在这个网站上手动选取的选择器列表 */
-export function buildSources(doc, settings, site) {
+const findLineAt = (lines, t) => { // lines 按开始时间排序：二分找 t 所在的句子
+  let lo = 0, hi = lines.length - 1, ans = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (lines[mid].start <= t + 0.08) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+  return ans >= 0 && t < lines[ans].end ? lines[ans] : null;
+};
+
+/** 已整理好的转录（YouTube 转写 / 语音识别）：按视频播放位置取当前这一句，与网站是否打开了字幕无关 */
+function linesCandidate(doc, getTx) {
+  return {
+    id: 'transcript',
+    get label() { return getTx()?.label || '转录'; },
+    /** 转录已经就绪时，没有当前句就是没有（不要退回去读屏幕字幕，两套断句会互相打架） */
+    exclusive: () => !!getTx()?.lines?.length,
+    read() {
+      const tx = getTx();
+      if (!tx?.lines?.length) return null;
+      const video = pickVideo(doc);
+      if (!video) return null;
+      const l = findLineAt(tx.lines, video.currentTime);
+      return l ? { text: l.text, lang: tx.lang || l.lang || null, video, rolling: false, lineId: l.id } : null;
+    },
+    upcoming(n = 30, ahead = 90) {
+      const tx = getTx(), video = pickVideo(doc);
+      if (!tx?.lines?.length || !video) return [];
+      const t = video.currentTime, out = [];
+      for (let i = 0; i < tx.lines.length && out.length < n; i++) {
+        const l = tx.lines[i];
+        if (l.end < t - 0.5) continue;
+        if (l.start > t + ahead) break;
+        out.push({ text: l.text, start: l.start, prev: i > 0 ? tx.lines[i - 1].text : '' });
+      }
+      return out;
+    },
+  };
+}
+
+/** 候选来源（按优先级）。picked 是用户在这个网站上手动选取的选择器列表；getTx 返回已整理好的转录（没有则不传） */
+export function buildSources(doc, settings, site, getTx = null) {
   const saved = new Map();
   const list = [];
   const picked = (settings.pickers?.[site] || []).filter(Boolean);
   if (picked.length) list.push(domCandidate({ id: 'picker', label: '手动选取的字幕位置', sel: picked.join(', ') }, doc));
+  const tr = getTx ? linesCandidate(doc, getTx) : null;
+  if (tr) list.push(tr); // 已整理好的转录优先于屏幕上的字幕
   for (const a of ADAPTERS) if (a.host.test(site)) list.push(domCandidate(a, doc));
   const tt = textTrackCandidate(doc, settings, saved);
   list.push(tt);
-  return { list, textTrack: tt, hideSelectors: list.filter((c) => c.hide).map((c) => c.hide) };
+  return { list, textTrack: tt, transcript: tr, hideSelectors: list.filter((c) => c.hide).map((c) => c.hide) };
 }
 
 /** 依次尝试，返回第一个有文字的来源：{ id, label, text, lang, video, rolling } */
@@ -116,6 +154,7 @@ export function readFirst(sources) {
   for (const c of sources.list) {
     const r = c.read();
     if (r?.text) return { id: c.id, label: c.label, ...r };
+    if (c.exclusive?.()) return null;
   }
   return null;
 }

@@ -20,6 +20,14 @@ export class Recorder {
     for (const l of this.lines) if (!before.has(l.id) || before.get(l.id) !== l.end + '|' + l.text) this.dirty.add(l.id);
   }
 
+  /** 用整份新的转录替换（YouTube 转写整理好之后）：旧的网站字幕记录作废，已有的译文按文字沿用 */
+  replaceAll(lines) {
+    const old = new Map(this.lines.filter((l) => l.tr).map((l) => [norm(l.text), l.tr]));
+    this.lines = mergeLines([], lines.map((l) => ({ ...l, tr: old.get(norm(l.text)) || l.tr })));
+    this.dirty = new Set(this.lines.map((l) => l.id));
+    this.loadedTrack = 'replaced';
+  }
+
   /** 网站字幕稳定下来的一句：返回它的 id（已有的就复用） */
   observe(text, t, lang) {
     const i = findMatch(this.lines, text, t);

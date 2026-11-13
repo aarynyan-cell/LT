@@ -26,7 +26,11 @@ export function manifest() {
     options_ui: { page: 'options/options.html', open_in_tab: true },
     side_panel: { default_path: 'sidepanel/sidepanel.html' },
     background: { service_worker: 'dist/background.js' },
-    content_scripts: [{ matches: ['<all_urls>'], js: ['dist/content.js'], all_frames: true, run_at: 'document_idle' }],
+    content_scripts: [
+      { matches: ['<all_urls>'], js: ['dist/content.js'], all_frames: true, run_at: 'document_idle' },
+      // YouTube：运行在页面自己的世界里，把播放器的字幕轨道列表交给内容脚本（内容脚本读不到页面的 JS 变量）
+      { matches: ['*://www.youtube.com/*', '*://m.youtube.com/*', '*://www.youtube-nocookie.com/*'], js: ['dist/yt-main.js'], world: 'MAIN', all_frames: true, run_at: 'document_start' },
+    ],
     // activeTab：点插件图标时临时获得当前标签页的地址与注入权（没有它，弹窗拿不到 tab.url，会误报“页面不支持”）；scripting：给装插件之前就已打开的页面补注入内容脚本
     // sidePanel：字幕侧边栏；unlimitedStorage：保存字幕转录与翻译记忆（IndexedDB）不被浏览器当作可清理数据
     permissions: ['storage', 'activeTab', 'scripting', 'sidePanel', 'unlimitedStorage'],
@@ -39,7 +43,7 @@ export function manifest() {
   };
 }
 
-const ENTRIES = { background: 'src/background.js', content: 'src/content.js', popup: 'src/popup.js', options: 'src/options.js', sidepanel: 'src/sidepanel.js' };
+const ENTRIES = { background: 'src/background.js', content: 'src/content.js', popup: 'src/popup.js', options: 'src/options.js', sidepanel: 'src/sidepanel.js', 'yt-main': 'src/yt-main.js' };
 
 /** 打包全部入口；write=false 时只返回内容（测试用来检查提交的 dist 是否过期） */
 export async function bundle({ write = true } = {}) {

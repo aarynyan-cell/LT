@@ -5,7 +5,8 @@ const { chromium } = require('playwright');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { start } = require('./ext-server.cjs');
+const { start, hits } = require('./ext-server.cjs');
+const { SENTENCES, sentenceStarts } = require('./ext-data.cjs');
 
 const EXT = path.resolve(__dirname, '../../../extension');
 const OUT = process.env.OUT || './e2e-out';
@@ -67,6 +68,10 @@ const MOCK = 'http://127.0.0.1:8788';
     const r = h.shadowRoot, q = (s) => r.querySelector(s), box = q('.box');
     return { hidden: box.hidden, o: q('.o').textContent, t1: q('.t1').textContent, t2: q('.t2').textContent, err: box.classList.contains('err'), parent: h.parentElement ? h.parentElement.tagName + '#' + h.parentElement.id : '', rect: box.getBoundingClientRect().toJSON(), fs: getComputedStyle(box).fontSize };
   });
+  const tabBySite = (site) => until(() => admin.evaluate(async (st) => {
+    for (const t of await chrome.tabs.query({})) { const r = await chrome.tabs.sendMessage(t.id, { type: 'ping' }).catch(() => null); if (r?.site === st) return t.id; }
+    return 0;
+  }, site), 6000, '找到标签页 ' + site);
   const open = async (url) => { const p = await ctx.newPage(); watch(p, 'page'); await p.goto(url); return p; };
   const seek = (p, t, play = false) => p.evaluate(([t, play]) => { const v = document.getElementById('v'); v.currentTime = t; play ? v.play() : v.pause(); }, [t, play]);
   const closeExtra = async () => { for (const p of ctx.pages()) if (p !== admin) await p.close().catch(() => {}); };
@@ -316,6 +321,99 @@ const MOCK = 'http://127.0.0.1:8788';
     await pop.goto(`chrome-extension://${id}/popup/popup.html?tabId=${tid}&url=${encodeURIComponent(PAGE)}`);
     await pop.waitForSelector('#panel');
     await pop.close(); await closeExtra();
+  });
+
+  // ================= YouTube 转写 =================
+  const YT = (mode) => `http://www.youtube.com:8799/watch?v=TESTVID12345&mode=${mode}`;
+  const starts = sentenceStarts();
+  const sentText = (i) => { const t = SENTENCES[i]; return t.charAt(0).toUpperCase() + t.slice(1) + '.'; };
+
+  await step('YouTube 转写：取视频自带的转写 → 整理成完整句子 → 与播放进度对齐 → 翻译（即使网站字幕没打开）', async () => {
+    await resetStore(); hits.timedtext = 0; hits.watch = 0;
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    const p = await open(YT('ytplayer'));
+    await seek(p, starts[1] + 0.5);
+    await until(async () => (await ov(p))?.t1 === `[g:zh-CN] ${sentText(1)}`, 12000, '悬浮层显示整句译文（不是屏幕上被切碎的三个词）');
+    await until(async () => (await statuses()).some((s) => s.source?.id === 'transcript' && /YouTube 转写（法语 · 自动生成）/.test(s.source.label)), 4000, '来源是 YouTube 转写');
+    // 每一句：开始时间对得上，句子是完整的
+    for (let i = 0; i < SENTENCES.length; i++) {
+      await seek(p, starts[i] + 0.2);
+      await until(async () => (await ov(p))?.t1 === `[g:zh-CN] ${sentText(i)}`, 5000, `第 ${i + 1} 句在 ${starts[i].toFixed(1)}s 显示`);
+    }
+    // 句子之间的停顿：不显示（时间与说话吻合，不会一直挂着上一句）
+    await seek(p, starts[3] - 0.15);
+    await until(async () => (await ov(p))?.hidden === true, 4000, '停顿处悬浮层隐藏');
+    // 侧边栏：整份转录一次性列出
+    const pn = await panelFor(await tabBySite('www.youtube.com'));
+    await until(async () => (await pn.locator('.ln').count()) === SENTENCES.length, 8000, `${SENTENCES.length} 句完整的句子`);
+    eq(await pn.locator('.ln').first().locator('.orig').textContent(), sentText(0), '第一句原文');
+    if (!/YouTube 转写/.test(await pn.locator('.sub').textContent())) throw new Error('侧边栏没有显示字幕来源');
+    await pn.screenshot({ path: `${OUT}/ext-9-yt-sidepanel.png` });
+    await pn.close(); await closeExtra();
+  });
+
+  await step('YouTube 转写：已整理好并保存，重新打开同一个视频不再取字幕、不再翻译', async () => {
+    // 接上一步（同一个视频已保存）：不清空
+    const t0 = hits.timedtext, w0 = hits.watch;
+    const g0 = (last.gtx || []).length;
+    const p = await open(YT('ytplayer'));
+    await seek(p, starts[4] + 0.3);
+    await until(async () => (await ov(p))?.t1 === `[g:zh-CN] ${sentText(4)}`, 6000, '刷新后译文直接出现');
+    await new Promise((r) => setTimeout(r, 1500));
+    eq(hits.timedtext, t0, '没有再请求字幕数据');
+    eq((last.gtx || []).length, g0, '没有再请求翻译');
+    void w0;
+    await closeExtra();
+  });
+
+  await step('YouTube 转写：字幕接口返回空内容时，读页面的“转写文字”面板，并把面板关回去', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    const p = await open(YT('ytpanel'));
+    await seek(p, 4.2);
+    await until(async () => (await statuses()).some((s) => s.source?.id === 'transcript' && /转写/.test(s.source.label)), 12000, '来源是转写');
+    await until(async () => /^\[g:zh-CN\] /.test((await ov(p))?.t1 || ''), 8000, '有译文');
+    eq(await p.evaluate(() => window.__panelClosed === true), true, '读完面板后已关闭');
+    const tx = (await statuses()).find((s) => s.tx)?.tx;
+    eq(tx?.info?.kind, 'panel', '来源类型是面板');
+    await closeExtra();
+  });
+
+  await step('YouTube 转写：页面脚本拿不到数据时，从页面 HTML 里取字幕轨道', async () => {
+    await resetStore(); hits.watch = 0;
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    const p = await open(YT('ythtml'));
+    await seek(p, starts[2] + 0.3);
+    await until(async () => (await ov(p))?.t1 === `[g:zh-CN] ${sentText(2)}`, 12000, '显示整句译文');
+    if (hits.watch < 2) throw new Error('没有去请求页面 HTML：' + hits.watch); // 第 1 次是打开页面，第 2 次是内容脚本取轨道列表
+    await closeExtra();
+  });
+
+  await step('YouTube 转写：没有可用转写时退回读屏幕字幕，并在弹窗里说明原因', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    hits.noTracks = true; // 页面 HTML 里也没有字幕轨道
+    const p = await open(YT('ytnone'));
+    await seek(p, starts[0] + 0.5, true);
+    await until(async () => (await statuses()).some((s) => s.tx?.state === 'failed'), 12000, '转写失败的状态');
+    await until(async () => (await statuses()).some((s) => s.source?.id === 'youtube'), 8000, '退回到屏幕上的 YouTube 字幕');
+    await until(async () => /^\[g:zh-CN\] en ville un/.test((await ov(p))?.t1 || ''), 6000, '读的是屏幕上被切碎的字幕');
+    const pop = await ctx.newPage(); watch(pop, 'popup');
+    await pop.goto(`chrome-extension://${id}/popup/popup.html?tabId=${await tabBySite('www.youtube.com')}`);
+    await pop.waitForSelector('#on');
+    await until(async () => /没取到 YouTube 转写/.test(await pop.locator('.status').textContent()), 4000, '弹窗说明了原因');
+    hits.noTracks = false;
+    await pop.close(); await closeExtra();
+  });
+
+  await step('YouTube 转写：可以在弹窗里关掉“用视频自带的转写”，改读屏幕字幕', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true }, ytTranscript: false }));
+    const p = await open(YT('ytplayer'));
+    await seek(p, starts[0] + 0.5, true);
+    await until(async () => /^\[g:zh-CN\] en ville un/.test((await ov(p))?.t1 || ''), 10000, '读屏幕字幕（三个词一段）');
+    eq((await statuses()).some((s) => s.source?.id === 'transcript'), false, '没有用转写');
+    await closeExtra();
   });
 
   // ================= 翻译引擎 =================

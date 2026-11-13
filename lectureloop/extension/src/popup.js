@@ -71,6 +71,8 @@ function statusBox() {
   else { tone = 'warn'; lines.push(h('div', {}, '… 还没找到字幕。请先在播放器里打开字幕；没有反应就点“选取字幕位置”。')); }
   const eng = best.provider === 'gtx' ? 'Google 免费翻译' : best.provider?.startsWith('ai:') ? `AI（${PROVIDERS[best.provider.slice(3)]?.name || best.provider}）` : best.provider === 'chrome' ? 'Chrome 内置翻译' : '';
   if (best.translated || best.cached || eng) lines.push(h('div', { class: 'tiny muted' }, `已翻译 ${best.translated} 句${best.cached ? `（${best.cached} 句来自本地缓存）` : ''}${eng ? ' · 引擎：' + eng : ''}`));
+  if (best.tx?.state === 'loading') lines.push(h('div', { class: 'tiny muted' }, '正在取 YouTube 转写并整理成句子…'));
+  if (best.tx?.state === 'failed') { tone = 'warn'; lines.push(h('div', { class: 'tiny' }, `没取到 YouTube 转写（${best.tx.error}），暂时读取屏幕上的字幕。`)); }
   if (best.note) { tone = 'warn'; lines.push(h('div', { class: 'tiny' }, best.note)); }
   if (best.error) { tone = 'err'; lines.push(h('div', { class: 'tiny' }, '⚠ ', best.error)); }
   return h('div', { class: 'status ' + tone }, lines);
@@ -103,7 +105,8 @@ function render() {
         sel('t2', { '': '（无）', ...targetOpts }, t2, (v) => set({ targets: v ? [t1, v].filter((x, i, a) => a.indexOf(x) === i) : [t1] }), '再加一种译文（可选）'))),
     h('div', { class: 'sec checks' },
       h('label', {}, h('input', { type: 'checkbox', id: 'orig', checked: settings.showOrig || settings.hideSite, disabled: settings.hideSite, onChange: (e) => set({ showOrig: e.target.checked }) }), '同时显示原文'),
-      h('label', {}, h('input', { type: 'checkbox', id: 'hide', checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), '隐藏网站自带字幕（只看悬浮字幕）')),
+      h('label', {}, h('input', { type: 'checkbox', id: 'hide', checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), '隐藏网站自带字幕（只看悬浮字幕）'),
+      h('label', { title: '直接取视频自带的转写（自动生成或人工字幕），整理成完整的句子并与播放进度对齐；比读取屏幕上滚动的字幕准确得多。取不到时自动退回读屏幕字幕' }, h('input', { type: 'checkbox', id: 'yt', checked: settings.ytTranscript, onChange: (e) => set({ ytTranscript: e.target.checked }) }), 'YouTube：用视频自带的转写（推荐）')),
     h('div', { class: 'sec' },
       h('div', { class: 'row' },
         h('div', { class: 'grow' }, h('label', { class: 'f', for: 'fs' }, '字号'), h('input', { type: 'range', id: 'fs', min: 0.5, max: 2.5, step: 0.1, value: settings.fontScale, onInput: (e) => setLater({ fontScale: +e.target.value }) })),

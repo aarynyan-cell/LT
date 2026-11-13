@@ -36,6 +36,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    ytTranscript: true,
+    // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
     bg: 0.55,
     pos: null,
@@ -56,6 +58,7 @@
     s.engine = ["auto", "llm", "gtx", "chrome"].includes(s.engine) ? s.engine : "auto";
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
+    s.ytTranscript = s.ytTranscript !== false;
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -282,6 +285,11 @@
     }
     const eng = best.provider === "gtx" ? "Google \u514D\u8D39\u7FFB\u8BD1" : best.provider?.startsWith("ai:") ? `AI\uFF08${PROVIDERS[best.provider.slice(3)]?.name || best.provider}\uFF09` : best.provider === "chrome" ? "Chrome \u5185\u7F6E\u7FFB\u8BD1" : "";
     if (best.translated || best.cached || eng) lines.push(h("div", { class: "tiny muted" }, `\u5DF2\u7FFB\u8BD1 ${best.translated} \u53E5${best.cached ? `\uFF08${best.cached} \u53E5\u6765\u81EA\u672C\u5730\u7F13\u5B58\uFF09` : ""}${eng ? " \xB7 \u5F15\u64CE\uFF1A" + eng : ""}`));
+    if (best.tx?.state === "loading") lines.push(h("div", { class: "tiny muted" }, "\u6B63\u5728\u53D6 YouTube \u8F6C\u5199\u5E76\u6574\u7406\u6210\u53E5\u5B50\u2026"));
+    if (best.tx?.state === "failed") {
+      tone = "warn";
+      lines.push(h("div", { class: "tiny" }, `\u6CA1\u53D6\u5230 YouTube \u8F6C\u5199\uFF08${best.tx.error}\uFF09\uFF0C\u6682\u65F6\u8BFB\u53D6\u5C4F\u5E55\u4E0A\u7684\u5B57\u5E55\u3002`));
+    }
     if (best.note) {
       tone = "warn";
       lines.push(h("div", { class: "tiny" }, best.note));
@@ -337,7 +345,8 @@
         "div",
         { class: "sec checks" },
         h("label", {}, h("input", { type: "checkbox", id: "orig", checked: settings.showOrig || settings.hideSite, disabled: settings.hideSite, onChange: (e) => set({ showOrig: e.target.checked }) }), "\u540C\u65F6\u663E\u793A\u539F\u6587"),
-        h("label", {}, h("input", { type: "checkbox", id: "hide", checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), "\u9690\u85CF\u7F51\u7AD9\u81EA\u5E26\u5B57\u5E55\uFF08\u53EA\u770B\u60AC\u6D6E\u5B57\u5E55\uFF09")
+        h("label", {}, h("input", { type: "checkbox", id: "hide", checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), "\u9690\u85CF\u7F51\u7AD9\u81EA\u5E26\u5B57\u5E55\uFF08\u53EA\u770B\u60AC\u6D6E\u5B57\u5E55\uFF09"),
+        h("label", { title: "\u76F4\u63A5\u53D6\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u81EA\u52A8\u751F\u6210\u6216\u4EBA\u5DE5\u5B57\u5E55\uFF09\uFF0C\u6574\u7406\u6210\u5B8C\u6574\u7684\u53E5\u5B50\u5E76\u4E0E\u64AD\u653E\u8FDB\u5EA6\u5BF9\u9F50\uFF1B\u6BD4\u8BFB\u53D6\u5C4F\u5E55\u4E0A\u6EDA\u52A8\u7684\u5B57\u5E55\u51C6\u786E\u5F97\u591A\u3002\u53D6\u4E0D\u5230\u65F6\u81EA\u52A8\u9000\u56DE\u8BFB\u5C4F\u5E55\u5B57\u5E55" }, h("input", { type: "checkbox", id: "yt", checked: settings.ytTranscript, onChange: (e) => set({ ytTranscript: e.target.checked }) }), "YouTube\uFF1A\u7528\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u63A8\u8350\uFF09")
       ),
       h(
         "div",

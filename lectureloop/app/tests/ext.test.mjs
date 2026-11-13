@@ -18,6 +18,8 @@ import { Recorder } from '../../extension/src/core/recorder.js';
 import { videoKeyOf } from '../../extension/src/core/videokey.js';
 import { tokenize, wordKey, wordStats, isStop } from '../../extension/src/core/words.js';
 import { translateWithTM, tmKey } from '../../extension/src/core/tm.js';
+import { parseJson3, parseXml, cuesFromPanel, parseTimestamp, extractCaptionTracksFromHtml, pickTrack, withFormat, isYouTubeUrl, decodeEntities } from '../../extension/src/core/captions.js';
+import { cuesToWords, segmentSentences, cuesToSentences } from '../../extension/src/core/segment.js';
 import { subtitleTask } from '../public/js/lib/ai-tasks.js';
 import { bundle, manifest, packageFiles, zipFiles } from '../tools/build-ext.mjs';
 
@@ -435,6 +437,95 @@ test('translateWithTM：命中记忆的句子不请求翻译；未命中的才�
   const bad = { ...deps(false), putMany: async () => { throw new Error('quota'); } };
   const r5 = await translateWithTM(req(['Zzz']), bad);
   assert.deepEqual(r5.results.zh, [{ i: 0, t: 'zh:Zzz' }]);
+});
+
+// ---------- YouTube 转写：解析与断句 ----------
+test('parseJson3：自动字幕带逐词时间；人工字幕整句；跳过只有换行的事件', () => {
+  const asr = parseJson3({ events: [
+    { tStartMs: 1000, dDurationMs: 3000, segs: [{ utf8: 'je' }, { utf8: ' ne', tOffsetMs: 300 }, { utf8: ' sais', tOffsetMs: 600 }, { utf8: ' pas', tOffsetMs: 1000 }] },
+    { tStartMs: 4000, dDurationMs: 100, segs: [{ utf8: '\n' }] },
+    { tStartMs: 5000, dDurationMs: 2000, segs: [{ utf8: "c'est trop tard" }] },
+  ] });
+  assert.equal(asr.length, 2);
+  assert.deepEqual(asr[0].words.map((w) => [w.w, w.t]), [['je', 1], ['ne', 1.3], ['sais', 1.6], ['pas', 2]]);
+  assert.equal(asr[1].words, undefined); assert.equal(asr[1].text, "c'est trop tard"); assert.equal(asr[1].start, 5);
+});
+test('parseXml：srv1（text start/dur，实体二次编码）与 srv3（p t/d，s 逐词）', () => {
+  const v1 = parseXml('<?xml version="1.0"?><transcript><text start="1.5" dur="2.25">Qu&amp;#39;est-ce que tu fais ?</text><text start="4" dur="1">&lt;i&gt;Non&lt;/i&gt;</text></transcript>');
+  assert.deepEqual(v1.map((c) => [c.start, c.end, c.text]), [[1.5, 3.75, "Qu'est-ce que tu fais ?"], [4, 5, 'Non']]);
+  const v3 = parseXml('<timedtext><body><p t="1000" d="2000"><s>Hello</s><s t="500"> world</s></p><p t="4000" d="1000">Plain &amp;amp; simple</p></body></timedtext>');
+  assert.equal(v3.length, 2);
+  assert.deepEqual(v3[0].words.map((w) => [w.w, w.t]), [['Hello', 1], ['world', 1.5]]);
+  assert.equal(v3[1].text, 'Plain & simple');
+  assert.equal(decodeEntities('&#233;t&#xE9;&amp;'), 'été&');
+});
+test('面板与页面数据：转写面板行、时间戳、HTML 里的 captionTracks、选轨道、URL 校验', () => {
+  assert.equal(parseTimestamp('1:02:03'), 3723); assert.equal(parseTimestamp('0:09'), 9); assert.ok(Number.isNaN(parseTimestamp('abc')));
+  const cues = cuesFromPanel([{ t: 5, text: 'deux' }, { t: 0, text: ' un  ' }, { t: 9, text: '' }, { t: 7, text: 'trois' }]);
+  assert.deepEqual(cues.map((c) => [c.start, c.end, c.text]), [[0, 5, 'un'], [5, 7, 'deux'], [7, 12, 'trois']]);
+  const html = 'x={"a":1,"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=1&lang=fr","name":{"simpleText":"French [auto]"},"languageCode":"fr","kind":"asr"},{"baseUrl":"https://www.youtube.com/api/timedtext?v=1&lang=en","languageCode":"en","name":{"simpleText":"a]b"}}],"audioTracks":[]}';
+  const tracks = extractCaptionTracksFromHtml(html);
+  assert.equal(tracks.length, 2); assert.equal(tracks[1].name.simpleText, 'a]b');
+  assert.deepEqual(extractCaptionTracksFromHtml('no tracks here'), []);
+  const t = [{ baseUrl: 'https://www.youtube.com/a', languageCode: 'en', name: 'English' }, { baseUrl: 'https://www.youtube.com/b', languageCode: 'fr', kind: 'asr', name: 'French (auto)' }, { baseUrl: 'https://www.youtube.com/c', languageCode: 'fr', name: 'Français' }];
+  assert.equal(pickTrack(t).kind, 'manual'); assert.equal(pickTrack(t).lang, 'fr', '同语言的人工字幕优先于自动生成');
+  assert.equal(pickTrack(t.slice(0, 2)).kind, 'asr', '没有同语言人工字幕就用自动生成（它的语言就是视频里说的语言）');
+  assert.equal(pickTrack(t, { source: 'en' }).lang, 'en');
+  assert.equal(pickTrack(t, { source: 'zh' }), null);
+  assert.equal(pickTrack([]), null);
+  assert.equal(withFormat('https://www.youtube.com/api/timedtext?v=1&fmt=srv3', 'json3'), 'https://www.youtube.com/api/timedtext?v=1&fmt=json3');
+  assert.ok(!withFormat('https://www.youtube.com/api/timedtext?v=1&fmt=srv3', null).includes('fmt'));
+  assert.equal(isYouTubeUrl('https://www.youtube.com/api/timedtext?v=1'), true);
+  assert.equal(isYouTubeUrl('https://evil.example.com/?u=youtube.com'), false);
+  assert.equal(isYouTubeUrl('javascript:alert(1)'), false);
+});
+
+// 造一段"自动字幕"：句子之间停顿 1 秒，词与词之间约 0.3 秒，没有任何标点
+function asrCues(sentences, { wordGap = 0.32, sentGap = 1.0, perCue = 6 } = {}) {
+  const words = []; let t = 2;
+  for (const s of sentences) { for (const w of s.split(' ')) { words.push({ w, t: +t.toFixed(3) }); t += wordGap; } t += sentGap; }
+  const cues = [];
+  for (let i = 0; i < words.length; i += perCue) { const ws = words.slice(i, i + perCue); cues.push({ start: ws[0].t, end: ws.at(-1).t + 0.4, text: ws.map((x) => x.w).join(' '), words: ws }); }
+  return cues;
+}
+test('segmentSentences：无标点的自动字幕按停顿还原句子，时间与说话时间吻合', () => {
+  const truth = ["en ville un homme menace toujours de se jeter du haut d'un immeuble", 'les pompiers sont sur place', 'il va sauter', 'je te parie un euro qui saute', 'et moi je te parie deux euros qui saute pas'];
+  const sents = cuesToSentences(asrCues(truth), 'fr');
+  assert.equal(sents.length, truth.length, JSON.stringify(sents.map((s) => s.text)));
+  sents.forEach((s, i) => assert.equal(s.text.toLowerCase().replace(/[.,?!]/g, ''), truth[i]));
+  assert.match(sents[0].text, /^En ville/); assert.match(sents[0].text, /\.$/, '补上句末标点');
+  // 每一句的开始时间 = 这句第一个词被说出来的时间
+  let t = 2; truth.forEach((s, i) => { assert.ok(Math.abs(sents[i].start - t) < 0.01, `第 ${i} 句开始 ${sents[i].start} 应为 ${t}`); t += s.split(' ').length * 0.32 + 1.0; });
+  for (let i = 1; i < sents.length; i++) assert.ok(sents[i].start >= sents[i - 1].end - 1e-6, '句子时间不重叠');
+  assert.ok(sents.every((s) => s.end > s.start + 0.5));
+});
+test('segmentSentences：人工字幕——跨 cue 的句子合并、按标点断开、缩写不断句、小数不断句', () => {
+  const cues = [
+    { start: 0, end: 2, text: "I think that" }, { start: 2, end: 4, text: 'we should go home. Really?' },
+    { start: 4.2, end: 6, text: 'Mr. Smith paid 3.5 euros' }, { start: 6, end: 8, text: 'for it, and that is fine.' },
+  ];
+  const s = cuesToSentences(cues, 'en');
+  assert.deepEqual(s.map((x) => x.text), ['I think that we should go home.', 'Really? Mr. Smith paid 3.5 euros for it, and that is fine.']);
+  assert.ok(s[0].start === 0 && s[0].end <= s[1].start);
+});
+test('segmentSentences：过长的句子在逗号/连接词/停顿处再切；碎片并入邻句；[Music] 与 ♪ 被忽略', () => {
+  const long = Array.from({ length: 60 }, (_, i) => (i === 29 ? 'but' : `mot${i}`)).join(' ');
+  const s = cuesToSentences([{ start: 0, end: 30, text: long }], 'en');
+  assert.ok(s.length >= 3 && s.every((x) => x.text.split(' ').length <= 27), s.map((x) => x.text.split(' ').length).join(','));
+  assert.equal(s.map((x) => x.text).join(' ').replace(/[.]/g, '').split(' ').length, 60, '没有丢词');
+  const frag = cuesToSentences([{ start: 0, end: 1, text: 'Okay.' }, { start: 1.2, end: 4, text: 'So now we look at the margin.' }], 'en');
+  assert.equal(frag.length, 1, '一个词的碎片并入下一句');
+  const noise = cuesToSentences([{ start: 0, end: 2, text: '[Music]' }, { start: 2, end: 4, text: '♪ hello there my friend ♪' }], 'en');
+  assert.deepEqual(noise.map((x) => x.text), ['Hello there my friend.']);
+});
+test('cuesToWords：滚动字幕（下一个 cue 重复上一个的结尾）只保留一份', () => {
+  const w = cuesToWords([{ start: 0, end: 2, text: 'where are you' }, { start: 1, end: 3, text: 'where are you going tonight' }], 'en');
+  assert.deepEqual(w.map((x) => x.w), ['where', 'are', 'you', 'going', 'tonight']);
+  assert.equal(segmentSentences([]).length, 0);
+});
+test('segmentSentences：中文按字数与标点', () => {
+  const s = cuesToSentences([{ start: 0, end: 4, text: '我不知道你想要什么。已经太晚了' }, { start: 4, end: 6, text: '我们走吧' }], 'zh');
+  assert.ok(s.length >= 2); assert.ok(s[0].text.startsWith('我不知道')); assert.ok(s.every((x) => /[。！？]$/.test(x.text)));
 });
 
 // ---------- 构建产物 ----------
