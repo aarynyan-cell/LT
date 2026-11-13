@@ -33,7 +33,7 @@ export function mergeLines(existing, incoming) {
     let cur = byId.get(inc.id);
     if (cur && norms[idx.get(inc.id)] !== n) cur = null; // 同 id 但内容不同：当作新的一句
     // 模糊匹配（文字相同 + 时间相近）只用于网站 DOM 字幕：字幕轨道里的每一句本来就有唯一的 id，相邻两句同样的话（"Non. Non."）是两句
-    if (!cur && !inc.id.startsWith('t')) { const i = findMatch(out, inc.text, inc.start, 3, norms); if (i >= 0) cur = out[i]; }
+    if (!cur && !/^[ta]/.test(inc.id)) { const i = findMatch(out, inc.text, inc.start, 3, norms); if (i >= 0) cur = out[i]; }
     if (cur) {
       cur.end = Math.max(cur.end, inc.end);
       if (inc.tr) cur.tr = { ...cur.tr, ...inc.tr };

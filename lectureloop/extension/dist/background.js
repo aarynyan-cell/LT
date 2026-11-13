@@ -11,6 +11,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    asr: "auto",
+    // 没有任何字幕时自动识别语音：auto | off（需要支持语音转写的服务商密钥）
     ytTranscript: true,
     // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
@@ -34,6 +36,7 @@
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
     s.ytTranscript = s.ytTranscript !== false;
+    s.asr = s.asr === "off" ? "off" : "auto";
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -156,6 +159,7 @@
     const { keys = {}, use = "" } = await c.storage.local.get(["keys", "use"]);
     return { keys, use: keys[use] ? use : Object.keys(keys)[0] || "" };
   };
+  var loadAsr = async (c = globalThis.chrome) => (await c.storage.local.get("asr")).asr || {};
   function selection({ keys, use }) {
     const e = keys?.[use];
     const provider = PROVIDERS[use];
@@ -474,6 +478,62 @@ ${JSON.stringify(schema)}`;
     return { provider, results, note, cached: hits };
   }
 
+  // ../extension/src/core/asr-api.js
+  var ASR_PROVIDERS = { openai: { model: "whisper-1" }, groq: { model: "whisper-large-v3-turbo" }, custom: { model: "" } };
+  function asrSelection({ keys = {}, use = "" }, asr = {}) {
+    const capable = Object.keys(keys).filter((id2) => ASR_PROVIDERS[id2]);
+    const id = capable.includes(asr.use) ? asr.use : capable[0];
+    if (!id) return null;
+    const e = keys[id];
+    const model = id === asr.use && asr.model || e.asrModel || ASR_PROVIDERS[id].model;
+    if (!model) return null;
+    return { id, key: e.key, model, base: e.base || PROVIDERS[id].base };
+  }
+  var HALLUCINATION = /^(thanks? (you )?for watching|thank you\.?$|merci d['’]avoir regardé|sous-titr|subtitles? by|amara\.org|www\.|♪|\[.*\]$|please subscribe|n'oubliez pas de vous abonner|字幕由|谢谢观看)/i;
+  function cleanSegments(json, durSec) {
+    const segs = Array.isArray(json?.segments) && json.segments.length ? json.segments : json?.text ? [{ start: 0, end: durSec, text: json.text }] : [];
+    const out = [];
+    for (const s of segs) {
+      const text = String(s.text || "").replace(/\s+/g, " ").trim();
+      if (!text || HALLUCINATION.test(text)) continue;
+      if ((s.no_speech_prob ?? 0) > 0.6 && (s.avg_logprob ?? 0) < -0.8) continue;
+      if ((s.compression_ratio ?? 0) > 2.4) continue;
+      out.push({ start: Math.max(0, +s.start || 0), end: Math.min(durSec + 0.5, +s.end || durSec), text });
+    }
+    return out;
+  }
+  async function transcribe({ sel, wav, language, durSec, fetchFn = fetch }) {
+    if (!sel) throw new ApiError("no_asr", "\u6CA1\u6709\u53EF\u7528\u7684\u8BED\u97F3\u8BC6\u522B\u670D\u52A1");
+    const form = new FormData();
+    form.append("file", new Blob([wav], { type: "audio/wav" }), "chunk.wav");
+    form.append("model", sel.model);
+    form.append("response_format", "verbose_json");
+    form.append("temperature", "0");
+    if (language && language !== "auto") form.append("language", language);
+    let r;
+    try {
+      r = await fetchFn(`${sel.base}/audio/transcriptions`, { method: "POST", headers: { authorization: `Bearer ${sel.key}` }, body: form });
+    } catch {
+      throw new ApiError("network", "\u65E0\u6CD5\u8FDE\u63A5\u8BED\u97F3\u8BC6\u522B\u670D\u52A1");
+    }
+    if (r.status === 401 || r.status === 403) throw new ApiError("auth", "\u8BED\u97F3\u8BC6\u522B\u670D\u52A1\u7684\u5BC6\u94A5\u65E0\u6548\u6216\u6CA1\u6709\u6743\u9650", r.status);
+    if (r.status === 429) throw new ApiError("rate_limit", "\u8BED\u97F3\u8BC6\u522B\u8BF7\u6C42\u8FC7\u4E8E\u9891\u7E41\u6216\u989D\u5EA6\u4E0D\u8DB3", 429);
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw new ApiError(r.status >= 500 ? "upstream" : "bad_request", `\u8BED\u97F3\u8BC6\u522B\u670D\u52A1\u9519\u8BEF ${r.status}${t ? "\uFF1A" + t.slice(0, 160) : ""}`, r.status);
+    }
+    const j = await r.json().catch(() => null);
+    if (!j) throw new ApiError("bad_json", "\u8BED\u97F3\u8BC6\u522B\u670D\u52A1\u8FD4\u56DE\u4E86\u65E0\u6CD5\u89E3\u6790\u7684\u5185\u5BB9");
+    return { segments: cleanSegments(j, durSec), language: (j.language || "").slice(0, 2).toLowerCase() || null };
+  }
+
+  // ../extension/src/core/pcm.js
+  function fromBase64(b64) {
+    const s = atob(b64), out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+  }
+
   // ../extension/src/core/transcript.js
   var norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").replace(/[^\p{L}\p{N} ]/gu, "").trim();
   function findMatch(lines, text, start, tol = 3, norms = null) {
@@ -505,7 +565,7 @@ ${JSON.stringify(schema)}`;
       const n = norm(inc.text);
       let cur = byId.get(inc.id);
       if (cur && norms[idx.get(inc.id)] !== n) cur = null;
-      if (!cur && !inc.id.startsWith("t")) {
+      if (!cur && !/^[ta]/.test(inc.id)) {
         const i = findMatch(out, inc.text, inc.start, 3, norms);
         if (i >= 0) cur = out[i];
       }
@@ -613,6 +673,24 @@ ${JSON.stringify(schema)}`;
           const run2 = (r) => translateBatch(r, { keys, endpoints: settings.endpoints });
           const wantAI = !!selection(keys) && msg.engine !== "gtx";
           reply({ ok: true, result: await translateWithTM(msg, { getMany: tmGetMany, putMany: tmPutMany, run: run2, wantAI }) });
+        } catch (e) {
+          reply(err(e));
+        }
+      })();
+      return true;
+    }
+    if (msg?.type === "asr-config") {
+      Promise.all([loadKeys(), loadAsr()]).then(([k, a]) => {
+        const sel = asrSelection(k, a);
+        reply({ ok: true, available: !!sel, provider: sel?.id || "", model: sel?.model || "" });
+      }).catch((e) => reply(err(e)));
+      return true;
+    }
+    if (msg?.type === "asr") {
+      (async () => {
+        try {
+          const [k, a] = await Promise.all([loadKeys(), loadAsr()]);
+          reply({ ok: true, ...await transcribe({ sel: asrSelection(k, a), wav: fromBase64(msg.wav), language: msg.language, durSec: msg.durSec }) });
         } catch (e) {
           reply(err(e));
         }

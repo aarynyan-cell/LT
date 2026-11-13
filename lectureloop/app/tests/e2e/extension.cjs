@@ -44,6 +44,7 @@ const MOCK = 'http://127.0.0.1:8788';
   const until = async (fn, ms = 9000, what = '条件') => {
     const t0 = Date.now(); let v;
     while (Date.now() - t0 < ms) { try { v = await fn(); if (v) return v; } catch { /* 继续等 */ } await new Promise((r) => setTimeout(r, 120)); }
+    if (process.env.DEBUG) console.log('   [DEBUG] 超时时的状态：', JSON.stringify(await statuses().catch(() => null)), JSON.stringify(Object.fromEntries(Object.entries(last).map(([k, x]) => [k, Array.isArray(x) ? x.length : typeof x]))));
     throw new Error(`等待超时：${what}（最后值 ${JSON.stringify(v)}）`);
   };
   const eq = (a, b, m) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}：期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
@@ -124,7 +125,7 @@ const MOCK = 'http://127.0.0.1:8788';
     await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
     const p = await open('http://www.youtube.com:8799/page.html?mode=yt');
     await seek(p, 5.2);
-    await until(async () => (await ov(p))?.t1 === "[g:zh-CN] C'est trop tard, il faut partir.", 9000, 'YouTube 字幕译文');
+    await until(async () => (await ov(p))?.t1 === "[g:zh-CN] C'est trop tard, il faut partir.", 9000, 'YouTube 字幕译文').catch(async (e) => { console.log('   [DEBUG] 悬浮层：', JSON.stringify(await ov(p)), 'gtx 请求：', JSON.stringify((last.gtx || []).map((x) => x.q))); throw e; })
     await until(async () => (await statuses()).some((s) => s.on && s.source?.id === 'youtube'), 4000, '状态里的来源是 YouTube');
     await setSync({ hideSite: true });
     await until(async () => (await p.evaluate(() => getComputedStyle(document.querySelector('.ytp-caption-window-container')).visibility)) === 'hidden', 4000, '网站字幕容器被隐藏');
@@ -379,6 +380,28 @@ const MOCK = 'http://127.0.0.1:8788';
     await closeExtra();
   });
 
+  await step('YouTube 转写：轨道地址取不到时，复用播放器自己请求过的字幕地址（带校验参数）', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    const p = await open(YT('ytobserved'));
+    await seek(p, starts[3] + 0.3);
+    await until(async () => (await ov(p))?.t1 === `[g:zh-CN] ${sentText(3)}`, 12000, '显示整句译文');
+    eq((await statuses()).find((s) => s.tx)?.tx?.info?.name, '播放器请求过的字幕', '来源是播放器请求过的字幕');
+    eq(await p.evaluate(() => window.__panelClosed === true), false, '没有去点转写面板');
+    await closeExtra();
+  });
+
+  await step('YouTube 转写：转写面板是新的 view-model 结构、按钮只有 aria-label 时也能读', async () => {
+    await resetStore();
+    await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
+    const p = await open(YT('ytpanel2'));
+    await seek(p, 4.2);
+    await until(async () => (await statuses()).some((s) => s.tx?.info?.kind === 'panel'), 12000, '读到了转写面板');
+    await until(async () => /^\[g:zh-CN\] /.test((await ov(p))?.t1 || ''), 8000, '有译文');
+    eq(await p.evaluate(() => window.__panelClosed === true), true, '读完面板后已关闭');
+    await closeExtra();
+  });
+
   await step('YouTube 转写：页面脚本拿不到数据时，从页面 HTML 里取字幕轨道', async () => {
     await resetStore(); hits.watch = 0;
     await setSync(baseSettings({ sites: { 'www.youtube.com': true } }));
@@ -413,6 +436,85 @@ const MOCK = 'http://127.0.0.1:8788';
     await seek(p, starts[0] + 0.5, true);
     await until(async () => /^\[g:zh-CN\] en ville un/.test((await ov(p))?.t1 || ''), 10000, '读屏幕字幕（三个词一段）');
     eq((await statuses()).some((s) => s.source?.id === 'transcript'), false, '没有用转写');
+    await closeExtra();
+  });
+
+  // ================= 语音识别（没有任何字幕时）=================
+  const seedAsrKey = (extra = {}) => admin.evaluate(([base, extra]) => chrome.storage.local.set({ keys: { custom: { key: 'asr-key-1', models: ['m'], fastModel: 'm', base, asrModel: 'whisper-test', ...extra } }, use: 'custom' }), [MOCK + '/p/ok', extra]);
+
+  await step('语音识别：没有字幕的视频 → 听声音，在停顿处切块识别 → 悬浮层与侧边栏出现句子 → 重看不重复识别', async () => {
+    await resetStore();
+    await seedAsrKey();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true }, engine: 'gtx' })); // 译文用免费引擎（有自定义密钥时 auto 会用 AI，前缀不同）
+    const p = await open(PAGE + '?mode=asr');
+    await p.evaluate(() => { const v = document.getElementById('v'); v.currentTime = 0; v.play(); });
+    // 前 4 秒什么字幕都没有才会启动识别，所以第一段说话（1.0–3.4s）赶不上；后两段（6.0–9.2、14.0–16.5）会被识别
+    await until(async () => (last.asr || []).length >= 1, 20000, '第一块音频被送去识别');
+    const a0 = last.asr[0];
+    if (a0.sr !== 16000) throw new Error('采样率应为 16 kHz：' + a0.sr);
+    if (a0.dur < 3 || a0.dur > 4.3) throw new Error('第一块应当是 6.0–9.2 秒那一段（约 3.2–3.7 秒），实际 ' + a0.dur);
+    eq([a0.model, a0.fmt, a0.auth], ['whisper-test', 'verbose_json', 'Bearer asr-key-1'], '请求参数');
+    await until(async () => (await ov(p))?.t1 === '[g:zh-CN] Phrase 1', 9000, '识别出的句子（延迟几秒）显示在悬浮层，并被翻译');
+    await until(async () => (last.asr || []).length === 2, 12000, '第二段说话也被识别');
+    await until(async () => (await statuses()).some((s) => s.asr?.state === 'running' && s.asr.lines >= 2), 8000, '状态：识别中，2 句');
+    // 侧边栏：两句，开始时间在各自说话的位置附近
+    const pn = await panelFor(await tabId(':8799/page.html?mode=asr'));
+    await until(async () => (await pn.locator('.ln').count()) === 2, 8000, '侧边栏 2 句');
+    const times = await pn.locator('.ln .t').allTextContents();
+    eq(times, ['0:05', '0:13'], '时间与说话位置吻合（说话从 6.0s / 14.0s 开始，块带 0.25s 前导，所以是 5.75 / 13.75）');
+    await pn.close();
+    // 重看：回到开头再播一遍——已识别的两段不再识别，只有没识别过的第一段说话会被送去
+    const n0 = last.asr.length;
+    await p.evaluate(() => { const v = document.getElementById('v'); v.currentTime = 0; v.play(); });
+    await until(async () => last.asr.length === n0 + 1, 12000, '只识别了没覆盖的第一段');
+    await new Promise((r) => setTimeout(r, 9000)); // 继续播过 6–9s 与 14–16.5s 的位置
+    eq(last.asr.length, n0 + 1, '已识别过的部分没有再送去识别');
+    // 按时间显示：回到 7 秒 → 第一句；回到 15 秒 → 第二句
+    await p.evaluate(() => { const v = document.getElementById('v'); v.currentTime = 7; v.pause(); });
+    await until(async () => (await ov(p))?.t1 === '[g:zh-CN] Phrase 1', 5000, '7 秒处显示第一句');
+    await p.evaluate(() => { document.getElementById('v').currentTime = 15; });
+    await until(async () => (await ov(p))?.t1 === '[g:zh-CN] Phrase 2', 5000, '15 秒处显示第二句');
+    await p.screenshot({ path: `${OUT}/ext-10-asr.png` });
+    await closeExtra();
+  });
+
+  await step('语音识别：没有配置支持语音转写的密钥时，说明原因，不乱发音频', async () => {
+    await resetStore();
+    await admin.evaluate(() => chrome.storage.local.set({ keys: { anthropic: { key: 'sk-ant-x', models: ['claude-haiku-5-5'] } }, use: 'anthropic' })); // Anthropic 没有语音转写
+    await setSync(baseSettings({ sites: { '127.0.0.1': true } }));
+    const p = await open(PAGE + '?mode=asr');
+    await p.evaluate(() => { document.getElementById('v').play(); });
+    await until(async () => (await statuses()).some((s) => s.asr?.state === 'nokey'), 15000, '状态：没有语音识别服务');
+    eq((last.asr || []).length, 0, '没有发出任何音频');
+    const pop = await ctx.newPage(); watch(pop, 'popup');
+    await pop.goto(`chrome-extension://${id}/popup/popup.html?tabId=${await tabId(':8799/page.html?mode=asr')}&url=${encodeURIComponent(PAGE)}`);
+    await pop.waitForSelector('#asr');
+    await until(async () => /支持语音转写的密钥/.test(await pop.locator('.status').textContent()), 8000, '弹窗说明了需要什么').catch(async (e) => { console.log('   [DEBUG] 弹窗状态文字：', await pop.locator('.status').textContent(), JSON.stringify(await statuses())); throw e; });
+    await pop.close(); await closeExtra();
+  });
+
+  await step('语音识别：在设置里关掉后，没有字幕也不识别；设置页能选语音识别服务', async () => {
+    await resetStore();
+    await seedAsrKey();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true }, asr: 'off' }));
+    const p = await open(PAGE + '?mode=asr');
+    await p.evaluate(() => { document.getElementById('v').play(); });
+    await new Promise((r) => setTimeout(r, 7000));
+    eq((last.asr || []).length, 0, '关闭后不识别');
+    await admin.reload();
+    await until(async () => (await admin.locator('#asr-use').count()) === 1, 4000, '设置页出现语音识别服务选项');
+    eq(await admin.locator('#asr-model').inputValue(), 'whisper-test', '模型名');
+    await closeExtra();
+  });
+
+  await step('语音识别：视频声音是静音（受 DRM 保护的视频）时给出说明', async () => {
+    await resetStore();
+    await seedAsrKey();
+    await setSync(baseSettings({ sites: { '127.0.0.1': true } }));
+    const p = await open(PAGE + '?mode=track&nocaps=1'); // 整段静音的视频，没有字幕轨道
+    await p.evaluate(() => { document.querySelectorAll('track').forEach((t) => t.remove()); const v = document.getElementById('v'); v.play(); });
+    await until(async () => (await statuses()).some((s) => s.asr?.state === 'error' && /静音|DRM/.test(s.asr.note || '')), 30000, 'DRM / 静音的说明');
+    eq((last.asr || []).length, 0, '静音不会被送去识别');
     await closeExtra();
   });
 

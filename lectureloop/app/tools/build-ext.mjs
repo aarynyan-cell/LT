@@ -11,7 +11,7 @@ import { cspOrigins } from '../public/js/lib/providers.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const EXT = resolve(here, '../../extension');
 const ZIP = resolve(here, '../public/downloads/lectureloop-subtitles.zip');
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export function manifest() {
   return {

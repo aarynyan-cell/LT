@@ -11,6 +11,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    asr: "auto",
+    // 没有任何字幕时自动识别语音：auto | off（需要支持语音转写的服务商密钥）
     ytTranscript: true,
     // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
@@ -34,6 +36,7 @@
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
     s.ytTranscript = s.ytTranscript !== false;
+    s.asr = s.asr === "off" ? "off" : "auto";
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -220,7 +223,8 @@
         if (!tx?.lines?.length) return null;
         const video = pickVideo(doc);
         if (!video) return null;
-        const l = findLineAt(tx.lines, video.currentTime);
+        let l = findLineAt(tx.lines, video.currentTime);
+        if (!l && tx.recent && Date.now() - tx.recent.at < 7e3 && video.currentTime >= tx.recent.line.start) l = tx.recent.line;
         return l ? { text: l.text, lang: tx.lang || l.lang || null, video, rolling: false, lineId: l.id } : null;
       },
       upcoming(n = 30, ahead = 90) {
@@ -297,7 +301,7 @@
       const n = norm(inc.text);
       let cur = byId.get(inc.id);
       if (cur && norms[idx.get(inc.id)] !== n) cur = null;
-      if (!cur && !inc.id.startsWith("t")) {
+      if (!cur && !/^[ta]/.test(inc.id)) {
         const i = findMatch(out, inc.text, inc.start, 3, norms);
         if (i >= 0) cur = out[i];
       }
@@ -337,6 +341,11 @@
       const before = new Map(this.lines.map((l) => [l.id, l.end + "|" + l.text]));
       this.lines = mergeLines(this.lines, incoming);
       for (const l of this.lines) if (!before.has(l.id) || before.get(l.id) !== l.end + "|" + l.text) this.dirty.add(l.id);
+    }
+    /** 追加已识别的句子（语音识别）：按 id 合并 */
+    addLines(lines) {
+      this.lines = mergeLines(this.lines, lines);
+      for (const l of lines) this.dirty.add(l.id);
     }
     /** 用整份新的转录替换（YouTube 转写整理好之后）：旧的网站字幕记录作废，已有的译文按文字沿用 */
     replaceAll(lines) {
@@ -757,21 +766,33 @@
     }
     return [];
   }
+  function observedTimedtextUrl(win, videoId) {
+    try {
+      const e = win.performance.getEntriesByType("resource").filter((x) => x.name.includes("timedtext") && x.name.includes(`v=${videoId}`) && isYouTubeUrl(x.name));
+      return e.length ? e[e.length - 1].name : "";
+    } catch {
+      return "";
+    }
+  }
+  var SEG = "ytd-transcript-segment-renderer, transcript-segment-view-model";
+  var TS = '.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="TranscriptSegmentViewModelTimestamp"]';
+  var TX = '.segment-text, .yt-core-attributed-string, [class*="TranscriptSegmentViewModelText"]';
+  var TX_BTN = /transcript|transcription|转写|转录|文字记录|transcripción/i;
   async function scrapePanel(doc, { wait = 6e3 } = {}) {
-    const SEG = "ytd-transcript-segment-renderer";
     let opened = false;
     if (!doc.querySelector(SEG)) {
-      const btn = doc.querySelector("ytd-video-description-transcript-section-renderer button, ytd-video-description-transcript-section-renderer ytd-button-renderer button");
+      let btn = doc.querySelector("ytd-video-description-transcript-section-renderer button");
+      if (!btn) btn = [...doc.querySelectorAll("#description button, ytd-watch-metadata button, #above-the-fold button")].find((b) => TX_BTN.test(b.getAttribute("aria-label") || "") || TX_BTN.test(b.textContent || ""));
       if (!btn) return [];
       btn.click();
       opened = true;
       for (let t = 0; t < wait && !doc.querySelector(SEG); t += 200) await sleep(200);
     }
     const rows = [...doc.querySelectorAll(SEG)].map((el) => ({
-      t: parseTimestamp(el.querySelector(".segment-timestamp")?.textContent),
-      text: el.querySelector(".segment-text")?.textContent || ""
+      t: parseTimestamp(el.querySelector(TS)?.textContent),
+      text: el.querySelector(TX)?.textContent || ""
     }));
-    if (opened) doc.querySelector('ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"] #visibility-button button')?.click();
+    if (opened) doc.querySelector('ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"] #visibility-button button, [target-id="engagement-panel-searchable-transcript"] [aria-label="Close"], [target-id="engagement-panel-searchable-transcript"] #visibility-button button')?.click();
     return cuesFromPanel(rows);
   }
   async function loadYouTubeTranscript({ win, doc, videoId, settings = {}, fetchFn = (u, i) => win.fetch(u, i) }) {
@@ -791,6 +812,18 @@
     let cues = [], kind = choice?.kind, lang = choice?.lang, name = choice?.name || "";
     if (choice) cues = await fetchCues(choice.track.baseUrl, fetchFn);
     if (!cues.length) {
+      const seen = observedTimedtextUrl(win, videoId);
+      if (seen) {
+        cues = await fetchCues(seen, fetchFn);
+        if (cues.length) {
+          const l = new URL(seen).searchParams.get("lang") || "";
+          kind ||= new URL(seen).searchParams.get("kind") === "asr" ? "asr" : "manual";
+          lang ||= l.slice(0, 2).toLowerCase() || void 0;
+          name = "\u64AD\u653E\u5668\u8BF7\u6C42\u8FC7\u7684\u5B57\u5E55";
+        }
+      }
+    }
+    if (!cues.length) {
       cues = await scrapePanel(doc);
       if (cues.length) {
         kind = "panel";
@@ -805,6 +838,209 @@
     const lines = sentences.map((s) => ({ id: `t${Math.round(s.start * 1e3)}`, start: s.start, end: s.end, text: s.text, lang }));
     return { lines, lang, kind, name, words: cues.reduce((n, c) => n + (c.words?.length || c.text.split(/\s+/).length), 0) };
   }
+
+  // ../extension/src/core/pcm.js
+  var Resampler = class {
+    constructor(inRate, outRate = 16e3) {
+      this.ratio = inRate / outRate;
+      this.tail = new Float32Array(0);
+      this.pos = 0;
+    }
+    process(input) {
+      const buf = new Float32Array(this.tail.length + input.length);
+      buf.set(this.tail);
+      buf.set(input, this.tail.length);
+      const out = [];
+      let pos = this.pos;
+      while (pos + this.ratio <= buf.length) {
+        const a = Math.floor(pos), b = Math.max(a + 1, Math.floor(pos + this.ratio));
+        let s = 0;
+        for (let i = a; i < b; i++) s += buf[i];
+        out.push(s / (b - a));
+        pos += this.ratio;
+      }
+      const used = Math.floor(pos);
+      this.tail = buf.slice(used);
+      this.pos = pos - used;
+      return Float32Array.from(out);
+    }
+  };
+  var rms = (f) => {
+    let s = 0;
+    for (let i = 0; i < f.length; i++) s += f[i] * f[i];
+    return Math.sqrt(s / (f.length || 1));
+  };
+  var Chunker = class {
+    constructor({ sr = 16e3, frame = 0.02, minSec = 2.2, maxSec = 12, silenceSec = 0.45, shortSilence = 1.1, preRoll = 0.25, minSpeech = 0.45, onChunk }) {
+      Object.assign(this, { sr, minSec, maxSec, silenceSec, shortSilence, preRoll, minSpeech, onChunk });
+      this.fs = Math.round(sr * frame);
+      this.frameSec = this.fs / sr;
+      this.rest = new Float32Array(0);
+      this.restStart = 0;
+      this.noise = 4e-3;
+      this.pre = [];
+      this.cur = null;
+    }
+    reset() {
+      this.rest = new Float32Array(0);
+      this.pre = [];
+      this.cur = null;
+    }
+    push(samples, mediaStart, rate = 1) {
+      const buf = new Float32Array(this.rest.length + samples.length);
+      buf.set(this.rest);
+      buf.set(samples, this.rest.length);
+      const t0 = this.rest.length ? this.restStart : mediaStart;
+      let i = 0;
+      for (; i + this.fs <= buf.length; i += this.fs) this._frame(buf.subarray(i, i + this.fs), t0 + i / this.sr * rate, rate);
+      this.rest = buf.slice(i);
+      this.restStart = t0 + i / this.sr * rate;
+    }
+    _frame(f, t, rate) {
+      const e = rms(f);
+      const speech = e > Math.max(0.012, this.noise * 2.6);
+      if (!speech) this.noise = e < this.noise ? this.noise * 0.9 + e * 0.1 : this.noise * 1.0006 + e * 4e-4;
+      if (!this.cur) {
+        if (!speech) {
+          this.pre.push(f);
+          if (this.pre.length > Math.ceil(this.preRoll / this.frameSec)) this.pre.shift();
+          return;
+        }
+        const frames = [...this.pre, f];
+        this.cur = { frames, start: t - this.pre.length * this.frameSec * rate, speechFrames: 1, silentRun: 0, rate };
+        this.pre = [];
+        return;
+      }
+      const c = this.cur;
+      c.frames.push(f);
+      if (speech) {
+        c.speechFrames++;
+        c.silentRun = 0;
+      } else c.silentRun += this.frameSec;
+      const dur = c.frames.length * this.frameSec;
+      if (dur >= this.maxSec || dur >= this.minSec && c.silentRun >= this.silenceSec || c.silentRun >= this.shortSilence) this._cut();
+    }
+    _cut() {
+      const c = this.cur;
+      this.cur = null;
+      if (!c) return;
+      const speechSec = c.speechFrames * this.frameSec;
+      let n = c.frames.length;
+      const keep = Math.ceil(0.2 / this.frameSec), trail = Math.floor(c.silentRun / this.frameSec);
+      if (trail > keep) n -= trail - keep;
+      if (speechSec < this.minSpeech) return;
+      const pcm = new Float32Array(n * this.fs);
+      for (let k = 0; k < n; k++) pcm.set(c.frames[k], k * this.fs);
+      this.onChunk({ pcm, start: c.start, end: c.start + pcm.length / this.sr * c.rate, speechSec, rate: c.rate });
+    }
+    /** 视频跳转 / 暂停 / 结束：把已经攒下的这一块吐出去 */
+    flush() {
+      this._cut();
+      this.pre = [];
+      this.rest = new Float32Array(0);
+    }
+  };
+  function encodeWav(f32, sr = 16e3) {
+    const n = f32.length, out = new Uint8Array(44 + n * 2), dv = new DataView(out.buffer);
+    const w = (o, s) => {
+      for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i);
+    };
+    w(0, "RIFF");
+    dv.setUint32(4, 36 + n * 2, true);
+    w(8, "WAVEfmt ");
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true);
+    dv.setUint16(22, 1, true);
+    dv.setUint32(24, sr, true);
+    dv.setUint32(28, sr * 2, true);
+    dv.setUint16(32, 2, true);
+    dv.setUint16(34, 16, true);
+    w(36, "data");
+    dv.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) {
+      const s = Math.max(-1, Math.min(1, f32[i]));
+      dv.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+    }
+    return out;
+  }
+  function toBase64(bytes) {
+    let s = "";
+    for (let i = 0; i < bytes.length; i += 32768) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    return btoa(s);
+  }
+
+  // ../extension/src/core/asr.js
+  var AsrSession = class {
+    constructor({ video, win, onChunk, onProblem = () => {
+    } }) {
+      this.video = video;
+      this.win = win;
+      this.onChunk = onChunk;
+      this.onProblem = onProblem;
+      this.lastEnd = null;
+      this.silentMs = 0;
+      this.heard = false;
+      this.running = false;
+      this.problem = "";
+    }
+    async start() {
+      const v = this.video;
+      const stream = v.captureStream ? v.captureStream() : v.mozCaptureStream ? v.mozCaptureStream() : null;
+      const tracks = stream?.getAudioTracks?.() || [];
+      if (!tracks.length) throw new Error("\u8FD9\u4E2A\u89C6\u9891\u62FF\u4E0D\u5230\u97F3\u9891\u8F68\u9053");
+      const AC = this.win.AudioContext || this.win.webkitAudioContext;
+      this.ctx = new AC();
+      if (this.ctx.state === "suspended") await this.ctx.resume().catch(() => {
+      });
+      this.src = this.ctx.createMediaStreamSource(new this.win.MediaStream(tracks));
+      this.proc = this.ctx.createScriptProcessor(4096, 1, 1);
+      this.res = new Resampler(this.ctx.sampleRate, 16e3);
+      this.chunker = new Chunker({ onChunk: (c) => this.onChunk(c) });
+      this.proc.onaudioprocess = (e) => this._process(e.inputBuffer.getChannelData(0));
+      this.src.connect(this.proc);
+      this.proc.connect(this.ctx.destination);
+      this.running = true;
+    }
+    _process(data) {
+      const v = this.video, rate = v.playbackRate || 1;
+      const dur = data.length / this.ctx.sampleRate * rate;
+      const mediaStart = v.currentTime - dur;
+      if (this.lastEnd != null && Math.abs(mediaStart - this.lastEnd) > 1) {
+        this.chunker.flush();
+      }
+      this.lastEnd = v.currentTime;
+      let peak = 0;
+      for (let i = 0; i < data.length; i += 16) {
+        const a = Math.abs(data[i]);
+        if (a > peak) peak = a;
+      }
+      if (peak > 1e-4) {
+        this.heard = true;
+        this.silentMs = 0;
+      } else if (!v.paused) {
+        this.silentMs += data.length / this.ctx.sampleRate * 1e3;
+        if (!this.heard && this.silentMs > 12e3 && !this.problem) {
+          this.problem = "drm";
+          this.onProblem("drm");
+        }
+      }
+      this.chunker.push(this.res.process(data), Math.max(0, mediaStart), rate);
+    }
+    stop() {
+      this.running = false;
+      try {
+        this.chunker?.flush();
+      } catch {
+      }
+      try {
+        this.proc && (this.proc.onaudioprocess = null);
+        this.src?.disconnect();
+        this.proc?.disconnect();
+        this.ctx?.close();
+      } catch {
+      }
+    }
+  };
 
   // ../extension/src/core/stabilizer.js
   var Stabilizer = class {
@@ -1159,6 +1395,12 @@
       this.rpc = rpc;
       this.tx = { state: "idle", info: null, error: "" };
       this.replaceNext = false;
+      this.asr = null;
+      this.asrBlocked = false;
+      this.asrInflight = 0;
+      this.asrRecent = null;
+      this.noSourceMs = 0;
+      this.asrState = { state: "idle", note: "", chunks: 0, lines: 0 };
       this.rec = new Recorder();
       this.vk = null;
       this.ready = false;
@@ -1212,6 +1454,7 @@
       clearInterval(this.timer);
       clearInterval(this.pf);
       this.clearLoop();
+      this._stopAsr();
       this._flush();
       this.vk = null;
       this.ready = false;
@@ -1239,6 +1482,10 @@
       if (prev.targets.join() !== s.targets.join() || prev.source !== s.source || prev.engine !== s.engine) {
         this.queue.clear();
         if (this.cur) this._translate(this.cur);
+      }
+      if (prev.asr !== s.asr) {
+        if (s.asr === "off") this._stopAsr();
+        else this.asrBlocked = false;
       }
       if (prev.ytTranscript !== s.ytTranscript || prev.source !== s.source) {
         this.tx = { state: "idle", info: null, error: "" };
@@ -1297,6 +1544,10 @@
       } else if (Date.now() - this.lastSeen > 8e3) this.src = null;
       this.overlay.setAnchor(found?.video || this.src?.video || null);
       this.overlay.layout();
+      const vid = found?.video || pickVideo(this.doc);
+      if (!found && vid && !vid.paused && !vid.ended) this.noSourceMs += TICK_MS;
+      else if (found) this.noSourceMs = 0;
+      this._maybeAsr(vid);
       const raw = found?.text || "";
       if (!raw && this.cur) {
         this.emptySince ||= Date.now();
@@ -1367,6 +1618,7 @@
       if (!loc) return;
       const k = videoKeyOf(loc);
       if (this.vk?.key === k.key) return;
+      this._stopAsr();
       this.vk = { ...k, title: (this.doc.title || "").trim() };
       this.ready = false;
       this.curLineId = "";
@@ -1377,7 +1629,8 @@
         if (this.vk?.key !== key) return;
         const v = r?.video;
         if (v?.lines?.length) this.rec.load(v.lines);
-        if (v?.src === "yt-transcript" && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: "ready", info: v.srcInfo || null, error: "" };
+        if (v?.src === "asr" && v.lines?.length) this.tx = { state: "ready", info: { ...v.srcInfo || {}, kind: "asr-audio", lang: v.srcInfo?.lang || v.lang }, error: "" };
+        else if (v?.src === "yt-transcript" && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: "ready", info: v.srcInfo || null, error: "" };
         else this.tx = { state: "idle", info: null, error: "" };
         this._seedFromLines();
         this.ready = true;
@@ -1421,7 +1674,7 @@
       const lines = this.rec.take();
       const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || "").trim() || this.vk.title, lang: this.tx.info?.lang || this.src?.lang || lines[0]?.lang || null };
       if (this.tx.state === "ready") {
-        meta.src = "yt-transcript";
+        meta.src = this.tx.info?.kind === "asr-audio" ? "asr" : "yt-transcript";
         meta.srcInfo = this.tx.info;
       }
       const replace = this.replaceNext;
@@ -1434,8 +1687,10 @@
       return /^yt:/.test(this.vk?.key || "") && this.settings.ytTranscript !== false;
     }
     _tx() {
-      if (this.tx.state !== "ready" || this.settings.ytTranscript === false || !this.rec.lines.length) return null;
       const i = this.tx.info || {};
+      const asr = i.kind === "asr-audio";
+      if (this.tx.state !== "ready" || !asr && this.settings.ytTranscript === false || !this.rec.lines.length) return null;
+      if (asr) return { lines: this.rec.lines, lang: i.lang, recent: this.asrRecent, label: `\u8BED\u97F3\u8BC6\u522B${i.lang ? "\uFF08" + (LANGS[i.lang] || i.lang) + "\uFF09" : ""}` };
       return { lines: this.rec.lines, lang: i.lang, label: `YouTube \u8F6C\u5199${i.lang ? "\uFF08" + (LANGS[i.lang] || i.lang) + (i.kind === "asr" ? " \xB7 \u81EA\u52A8\u751F\u6210" : i.kind === "manual" ? " \xB7 \u4EBA\u5DE5\u5B57\u5E55" : "") + "\uFF09" : ""}` };
     }
     /** 取视频自带的转写，整理成句子，替换掉之前记录的屏幕字幕。失败不影响使用：退回读取屏幕字幕 */
@@ -1458,6 +1713,80 @@
       if (!this._wantTranscript()) return false;
       this._loadTranscript();
       return true;
+    }
+    // ---------- 语音识别（没有任何字幕时的兜底）----------
+    /** 条件：设置没关；没有转写/字幕（YouTube 要先等转写失败）；视频连续播放了几秒什么字幕都没读到——或者这个视频以前识别过（继续识别没覆盖的部分） */
+    _maybeAsr(vid) {
+      if (this.asr || this.asrBlocked || this.settings.asr === "off" || !this.ready || !this.vk || !vid) return;
+      if (this.tx.state === "loading" || this.tx.state === "ready" && this.tx.info?.kind !== "asr-audio") return;
+      if (this._wantTranscript() && this.tx.state !== "failed") return;
+      const before = this.tx.info?.kind === "asr-audio";
+      if (before ? vid.paused : this.noSourceMs < 4e3) return;
+      this._startAsr(vid);
+    }
+    _startAsr(vid) {
+      this.asrState = { state: "starting", note: "", chunks: 0, lines: this.asrState.lines };
+      this.rpc("asr-config", {}).then(async (cfg) => {
+        if (!this.on || !this.vk) return;
+        if (!cfg?.available) {
+          this.asrBlocked = true;
+          this.asrState = { state: "nokey", note: "", chunks: 0, lines: 0 };
+          return;
+        }
+        const s = new AsrSession({ video: vid, win: this.doc.defaultView, onChunk: (c) => this._asrChunk(c), onProblem: (p) => {
+          this.asrState = { ...this.asrState, state: "error", note: p === "drm" ? "\u62FF\u5230\u7684\u662F\u9759\u97F3\uFF1A\u8FD9\u4E2A\u89C6\u9891\u53EF\u80FD\u53D7\u7248\u6743\u4FDD\u62A4\uFF08DRM\uFF09\uFF0C\u7F51\u9875\u65E0\u6CD5\u83B7\u53D6\u5B83\u7684\u58F0\u97F3" : "\u6CA1\u6709\u58F0\u97F3" };
+        } });
+        try {
+          await s.start();
+          this.asr = s;
+          this.asrState = { ...this.asrState, state: "running", note: `${cfg.provider} \xB7 ${cfg.model}` };
+        } catch (e) {
+          this.asrBlocked = true;
+          this.asrState = { state: "error", note: e.message || "\u65E0\u6CD5\u83B7\u53D6\u89C6\u9891\u58F0\u97F3", chunks: 0, lines: 0 };
+        }
+      }).catch(() => {
+        this.asrBlocked = true;
+      });
+    }
+    _stopAsr() {
+      this.asr?.stop();
+      this.asr = null;
+      this.asrBlocked = false;
+      this.asrInflight = 0;
+      this.noSourceMs = 0;
+      this.asrRecent = null;
+      this.asrState = { state: "idle", note: "", chunks: 0, lines: 0 };
+    }
+    /** 这一块说话的时间段，已经有识别结果覆盖了吗（重看、循环播放时不重复识别） */
+    _covered(start, end) {
+      let cov = 0;
+      for (const l of this.rec.lines) if (l.id.startsWith("a")) cov += Math.max(0, Math.min(end, l.end + 0.3) - Math.max(start, l.start - 0.3));
+      return cov / Math.max(0.1, end - start) >= 0.6;
+    }
+    _asrChunk(c) {
+      if (this._covered(c.start, c.end)) return;
+      if (this.asrInflight >= 2) return;
+      this.asrInflight++;
+      this.rpc("asr", { wav: toBase64(encodeWav(c.pcm)), durSec: c.pcm.length / 16e3, language: this.settings.source !== "auto" ? this.settings.source : void 0 }).then((r) => {
+        if (!r?.ok) throw new Error(r?.error?.message || "\u8BED\u97F3\u8BC6\u522B\u5931\u8D25");
+        this.asrState = { ...this.asrState, chunks: this.asrState.chunks + 1, error: "" };
+        const lines = r.segments.map((s) => ({ id: `a${Math.round((c.start + s.start * c.rate) * 1e3)}`, start: c.start + s.start * c.rate, end: Math.max(c.start + s.end * c.rate, c.start + s.start * c.rate + 0.6), text: s.text, lang: r.language || void 0 }));
+        if (lines.length) this._addAsr(lines, r.language);
+      }).catch((e) => {
+        this.asrState = { ...this.asrState, error: e.message || "\u8BED\u97F3\u8BC6\u522B\u5931\u8D25" };
+        this.error = e.message;
+        this._render();
+      }).finally(() => {
+        this.asrInflight--;
+      });
+    }
+    _addAsr(lines, lang) {
+      this.rec.addLines(lines);
+      if (this.tx.state !== "ready") this.tx = { state: "ready", info: { kind: "asr-audio", lang }, error: "" };
+      else if (lang && this.tx.info?.kind === "asr-audio") this.tx.info.lang = lang;
+      this.asrRecent = { line: lines.at(-1), at: Date.now() };
+      this.asrState = { ...this.asrState, lines: this.rec.lines.filter((l) => l.id.startsWith("a")).length };
+      this._flushSoon();
     }
     // ---------- 侧边栏的指令 ----------
     seek(t, play) {
@@ -1516,7 +1845,8 @@
         note: this.note,
         provider: this.provider || "",
         video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null,
-        tx: { state: this.tx.state, error: this.tx.error, info: this.tx.info }
+        tx: { state: this.tx.state, error: this.tx.error, info: this.tx.info },
+        asr: this.asrState
       };
       const j = JSON.stringify(s);
       if (j !== this.lastStatus) {

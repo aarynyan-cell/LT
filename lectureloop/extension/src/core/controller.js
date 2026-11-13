@@ -4,6 +4,8 @@ import { Recorder } from './recorder.js';
 import { videoKeyOf } from './videokey.js';
 import { loadYouTubeTranscript } from './yt.js';
 import { LANGS } from './langs.js';
+import { AsrSession } from './asr.js';
+import { encodeWav, toBase64 } from './pcm.js';
 import { Stabilizer } from './stabilizer.js';
 import { TranslateQueue } from './translator.js';
 import { Overlay } from './overlay.js';
@@ -22,6 +24,7 @@ export class Controller {
   constructor({ doc = globalThis.document, site, settings, send, saveSettings, report = () => {}, rpc = async () => ({}), timers = undefined }) {
     this.doc = doc; this.site = site; this.settings = settings; this.saveSettings = saveSettings; this.report = report; this.rpc = rpc;
     this.tx = { state: 'idle', info: null, error: '' }; this.replaceNext = false;
+    this.asr = null; this.asrBlocked = false; this.asrInflight = 0; this.asrRecent = null; this.noSourceMs = 0; this.asrState = { state: 'idle', note: '', chunks: 0, lines: 0 };
     this.rec = new Recorder(); this.vk = null; this.ready = false; this.curLineId = ''; this.flushTimer = 0; this.loop = null;
     this.cachedHits = 0; this.on = false; this.cur = ''; this.src = null; this.lastSeen = 0; this.error = ''; this.note = ''; this.recent = [];
     this.queue = new TranslateQueue({
@@ -48,6 +51,7 @@ export class Controller {
     this.on = false;
     clearInterval(this.timer); clearInterval(this.pf);
     this.clearLoop();
+    this._stopAsr();
     this._flush();
     this.vk = null; this.ready = false;
     this.stab.clear();
@@ -66,6 +70,7 @@ export class Controller {
     if (srcChanged) { this.sources?.textTrack.restore(); this._rebuild(); this.prefetched.clear(); }
     this.overlay.setOptions(this._ov());
     if (prev.targets.join() !== s.targets.join() || prev.source !== s.source || prev.engine !== s.engine) { this.queue.clear(); if (this.cur) this._translate(this.cur); }
+    if (prev.asr !== s.asr) { if (s.asr === 'off') this._stopAsr(); else this.asrBlocked = false; }
     if (prev.ytTranscript !== s.ytTranscript || prev.source !== s.source) { this.tx = { state: 'idle', info: null, error: '' }; if (this._wantTranscript()) this._loadTranscript(); }
     if (prev.targets.join() !== s.targets.join()) this._seedFromLines();
     this._render();
@@ -115,6 +120,9 @@ export class Controller {
     else if (Date.now() - this.lastSeen > 8000) this.src = null;
     this.overlay.setAnchor(found?.video || this.src?.video || null);
     this.overlay.layout();
+    const vid = found?.video || pickVideo(this.doc);
+    if (!found && vid && !vid.paused && !vid.ended) this.noSourceMs += TICK_MS; else if (found) this.noSourceMs = 0;
+    this._maybeAsr(vid);
     const raw = found?.text || '';
     // 相邻两句之间网站常常会把字幕清空一瞬间：空白持续超过 250ms 才真正隐藏，避免闪烁
     if (!raw && this.cur) { this.emptySince ||= Date.now(); if (Date.now() - this.emptySince < 250) { this._status(); return; } } else this.emptySince = 0;
@@ -168,6 +176,7 @@ export class Controller {
     if (!loc) return;
     const k = videoKeyOf(loc);
     if (this.vk?.key === k.key) return;
+    this._stopAsr();
     this.vk = { ...k, title: (this.doc.title || '').trim() };
     this.ready = false; this.curLineId = ''; this.recent = [];
     this.rec.reset(this.vk);
@@ -177,7 +186,8 @@ export class Controller {
       const v = r?.video;
       if (v?.lines?.length) this.rec.load(v.lines);
       // 上次已经整理好的 YouTube 转写：直接用，不用再取一遍
-      if (v?.src === 'yt-transcript' && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: 'ready', info: v.srcInfo || null, error: '' };
+      if (v?.src === 'asr' && v.lines?.length) this.tx = { state: 'ready', info: { ...(v.srcInfo || {}), kind: 'asr-audio', lang: v.srcInfo?.lang || v.lang }, error: '' };
+      else if (v?.src === 'yt-transcript' && v.lines?.length && this.settings.ytTranscript !== false) this.tx = { state: 'ready', info: v.srcInfo || null, error: '' };
       else this.tx = { state: 'idle', info: null, error: '' };
       this._seedFromLines();
       this.ready = true;
@@ -219,7 +229,7 @@ export class Controller {
     if (!this.vk || !this.rec.hasDirty) return;
     const lines = this.rec.take();
     const meta = { key: this.vk.key, site: this.vk.site, url: this.vk.url, title: (this.doc.title || '').trim() || this.vk.title, lang: this.tx.info?.lang || this.src?.lang || lines[0]?.lang || null };
-    if (this.tx.state === 'ready') { meta.src = 'yt-transcript'; meta.srcInfo = this.tx.info; }
+    if (this.tx.state === 'ready') { meta.src = this.tx.info?.kind === 'asr-audio' ? 'asr' : 'yt-transcript'; meta.srcInfo = this.tx.info; }
     const replace = this.replaceNext; this.replaceNext = false;
     this.rpc('tx-upsert', { video: meta, lines, replace }).catch(() => {});
   }
@@ -227,8 +237,10 @@ export class Controller {
   // ---------- YouTube 转写 ----------
   _wantTranscript() { return /^yt:/.test(this.vk?.key || '') && this.settings.ytTranscript !== false; }
   _tx() {
-    if (this.tx.state !== 'ready' || this.settings.ytTranscript === false || !this.rec.lines.length) return null;
     const i = this.tx.info || {};
+    const asr = i.kind === 'asr-audio';
+    if (this.tx.state !== 'ready' || (!asr && this.settings.ytTranscript === false) || !this.rec.lines.length) return null;
+    if (asr) return { lines: this.rec.lines, lang: i.lang, recent: this.asrRecent, label: `语音识别${i.lang ? '（' + (LANGS[i.lang] || i.lang) + '）' : ''}` };
     return { lines: this.rec.lines, lang: i.lang, label: `YouTube 转写${i.lang ? '（' + (LANGS[i.lang] || i.lang) + (i.kind === 'asr' ? ' · 自动生成' : i.kind === 'manual' ? ' · 人工字幕' : '') + '）' : ''}` };
   }
   /** 取视频自带的转写，整理成句子，替换掉之前记录的屏幕字幕。失败不影响使用：退回读取屏幕字幕 */
@@ -246,6 +258,55 @@ export class Controller {
   }
   /** 侧边栏的"重新整理"：忽略已保存的，重新取一遍 */
   reloadTranscript() { if (!this._wantTranscript()) return false; this._loadTranscript(); return true; }
+
+  // ---------- 语音识别（没有任何字幕时的兜底）----------
+  /** 条件：设置没关；没有转写/字幕（YouTube 要先等转写失败）；视频连续播放了几秒什么字幕都没读到——或者这个视频以前识别过（继续识别没覆盖的部分） */
+  _maybeAsr(vid) {
+    if (this.asr || this.asrBlocked || this.settings.asr === 'off' || !this.ready || !this.vk || !vid) return;
+    if (this.tx.state === 'loading' || (this.tx.state === 'ready' && this.tx.info?.kind !== 'asr-audio')) return;
+    if (this._wantTranscript() && this.tx.state !== 'failed') return;
+    const before = this.tx.info?.kind === 'asr-audio';
+    if (before ? vid.paused : this.noSourceMs < 4000) return;
+    this._startAsr(vid);
+  }
+  _startAsr(vid) {
+    this.asrState = { state: 'starting', note: '', chunks: 0, lines: this.asrState.lines };
+    this.rpc('asr-config', {}).then(async (cfg) => {
+      if (!this.on || !this.vk) return;
+      if (!cfg?.available) { this.asrBlocked = true; this.asrState = { state: 'nokey', note: '', chunks: 0, lines: 0 }; return; }
+      const s = new AsrSession({ video: vid, win: this.doc.defaultView, onChunk: (c) => this._asrChunk(c), onProblem: (p) => { this.asrState = { ...this.asrState, state: 'error', note: p === 'drm' ? '拿到的是静音：这个视频可能受版权保护（DRM），网页无法获取它的声音' : '没有声音' }; } });
+      try { await s.start(); this.asr = s; this.asrState = { ...this.asrState, state: 'running', note: `${cfg.provider} · ${cfg.model}` }; }
+      catch (e) { this.asrBlocked = true; this.asrState = { state: 'error', note: e.message || '无法获取视频声音', chunks: 0, lines: 0 }; }
+    }).catch(() => { this.asrBlocked = true; });
+  }
+  _stopAsr() { this.asr?.stop(); this.asr = null; this.asrBlocked = false; this.asrInflight = 0; this.noSourceMs = 0; this.asrRecent = null; this.asrState = { state: 'idle', note: '', chunks: 0, lines: 0 }; }
+
+  /** 这一块说话的时间段，已经有识别结果覆盖了吗（重看、循环播放时不重复识别） */
+  _covered(start, end) {
+    let cov = 0;
+    for (const l of this.rec.lines) if (l.id.startsWith('a')) cov += Math.max(0, Math.min(end, l.end + 0.3) - Math.max(start, l.start - 0.3));
+    return cov / Math.max(0.1, end - start) >= 0.6;
+  }
+  _asrChunk(c) {
+    if (this._covered(c.start, c.end)) return;
+    if (this.asrInflight >= 2) return; // 识别跟不上播放：丢掉这一块，不要越堆越多
+    this.asrInflight++;
+    this.rpc('asr', { wav: toBase64(encodeWav(c.pcm)), durSec: c.pcm.length / 16000, language: this.settings.source !== 'auto' ? this.settings.source : undefined }).then((r) => {
+      if (!r?.ok) throw new Error(r?.error?.message || '语音识别失败');
+      this.asrState = { ...this.asrState, chunks: this.asrState.chunks + 1, error: '' };
+      const lines = r.segments.map((s) => ({ id: `a${Math.round((c.start + s.start * c.rate) * 1000)}`, start: c.start + s.start * c.rate, end: Math.max(c.start + s.end * c.rate, c.start + s.start * c.rate + 0.6), text: s.text, lang: r.language || undefined }));
+      if (lines.length) this._addAsr(lines, r.language);
+    }).catch((e) => { this.asrState = { ...this.asrState, error: e.message || '语音识别失败' }; this.error = e.message; this._render(); })
+      .finally(() => { this.asrInflight--; });
+  }
+  _addAsr(lines, lang) {
+    this.rec.addLines(lines);
+    if (this.tx.state !== 'ready') this.tx = { state: 'ready', info: { kind: 'asr-audio', lang }, error: '' };
+    else if (lang && this.tx.info?.kind === 'asr-audio') this.tx.info.lang = lang;
+    this.asrRecent = { line: lines.at(-1), at: Date.now() };
+    this.asrState = { ...this.asrState, lines: this.rec.lines.filter((l) => l.id.startsWith('a')).length };
+    this._flushSoon();
+  }
 
   // ---------- 侧边栏的指令 ----------
   seek(t, play) { return seekTo(this.doc, t, play); }
@@ -289,6 +350,7 @@ export class Controller {
       error: this.error, note: this.note, provider: this.provider || '',
       video: this.vk ? { key: this.vk.key, title: this.vk.title, lineId: this.curLineId, n: this.rec.lines.length } : null,
       tx: { state: this.tx.state, error: this.tx.error, info: this.tx.info },
+      asr: this.asrState,
     };
     const j = JSON.stringify(s);
     if (j !== this.lastStatus) { this.lastStatus = j; this.report(s); }

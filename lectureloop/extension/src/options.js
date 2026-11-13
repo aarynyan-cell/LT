@@ -1,7 +1,8 @@
 // 设置页：管理 AI 密钥（可选）。没有密钥也能用免费的 Google 翻译。
 import { h, clear } from './dom.js';
 import { PROVIDERS, detectProvider, maskKey, pickModels } from '../../app/public/js/lib/providers.js';
-import { loadKeys, saveKey, removeKey, setUse, selection } from './core/keys.js';
+import { loadKeys, saveKey, removeKey, setUse, selection, loadAsr, saveAsr } from './core/keys.js';
+import { ASR_PROVIDERS, asrSelection } from './core/asr-api.js';
 import { probeKey } from './core/llm.js';
 import { translateLLM } from './core/llm.js';
 import { translateGtx } from './core/engines.js';
@@ -13,8 +14,9 @@ let state = { keys: {}, use: '' };
 let msg = null; // { tone, text }
 let busy = false;
 let dbStats = null;
+let asrCfg = {};
 
-const refresh = async () => { state = await loadKeys(); dbStats = await stats().catch(() => null); render(); };
+const refresh = async () => { asrCfg = await loadAsr(); state = await loadKeys(); dbStats = await stats().catch(() => null); render(); };
 const say = (tone, text) => { msg = { tone, text }; render(); };
 
 async function addKey() {
@@ -96,6 +98,18 @@ function render() {
           h('button', { class: 'btn', disabled: busy, onClick: () => testProvider(id) }, '测试'),
           h('button', { class: 'btn danger', onClick: async () => { await removeKey(id); await refresh(); } }, '删除'));
       }) : h('div', { class: 'muted' }, '还没有。')),
+    h('div', { class: 'card' },
+      h('h2', {}, '语音识别（视频没有字幕时）'),
+      (() => {
+        const capable = Object.keys(state.keys).filter((id) => ASR_PROVIDERS[id]);
+        const sel = asrSelection(state, asrCfg);
+        if (!capable.length) return h('div', { class: 'muted', id: 'asr-none' }, '视频没有任何字幕时，插件可以听视频的声音识别成字幕再翻译。这需要一个支持“语音转写（Whisper）”的服务：在上面添加 OpenAI 或 Groq 的密钥（或填写自定义的 Whisper 接口地址）即可。Anthropic / DeepSeek 等没有语音转写，不能用于这里。');
+        return h('div', { class: 'col' },
+          h('div', { class: 'row' },
+            h('select', { id: 'asr-use', 'aria-label': '语音识别服务', onChange: async (e) => { await saveAsr({ ...asrCfg, use: e.target.value, model: '' }); await refresh(); } }, capable.map((id) => h('option', { value: id, selected: sel?.id === id }, PROVIDERS[id].name))),
+            h('input', { type: 'text', id: 'asr-model', 'aria-label': '语音识别模型', placeholder: '模型（' + (sel ? ASR_PROVIDERS[sel.id].model || '必填' : '') + '）', value: (sel?.id === asrCfg.use && asrCfg.model) || state.keys[sel?.id]?.asrModel || '', style: 'max-width:220px', onChange: async (e) => { const v = e.target.value.trim(); if (sel) { await saveKey(sel.id, { asrModel: v }); await saveAsr({ ...asrCfg, use: sel.id, model: v }); await refresh(); } } })),
+          h('div', { class: 'tiny muted' }, sel ? `当前：${PROVIDERS[sel.id].name} · ${sel.model}。识别按“一句话一块”的音频发送（只发送有人说话的部分），声音只发给这个服务。` : '自定义地址需要填写模型名后才能使用。'));
+      })()),
     h('div', { class: 'card' },
       h('h2', {}, '本地数据'),
       h('div', { class: 'muted', id: 'dbstats' }, dbStats ? `已保存 ${dbStats.videos} 个视频的字幕、${dbStats.tm} 条翻译记忆、${dbStats.saved} 个收藏。` : '…'),

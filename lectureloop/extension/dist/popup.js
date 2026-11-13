@@ -36,6 +36,8 @@
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    asr: "auto",
+    // 没有任何字幕时自动识别语音：auto | off（需要支持语音转写的服务商密钥）
     ytTranscript: true,
     // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
@@ -59,6 +61,7 @@
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
     s.ytTranscript = s.ytTranscript !== false;
+    s.asr = s.asr === "off" ? "off" : "auto";
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -285,6 +288,16 @@
     }
     const eng = best.provider === "gtx" ? "Google \u514D\u8D39\u7FFB\u8BD1" : best.provider?.startsWith("ai:") ? `AI\uFF08${PROVIDERS[best.provider.slice(3)]?.name || best.provider}\uFF09` : best.provider === "chrome" ? "Chrome \u5185\u7F6E\u7FFB\u8BD1" : "";
     if (best.translated || best.cached || eng) lines.push(h("div", { class: "tiny muted" }, `\u5DF2\u7FFB\u8BD1 ${best.translated} \u53E5${best.cached ? `\uFF08${best.cached} \u53E5\u6765\u81EA\u672C\u5730\u7F13\u5B58\uFF09` : ""}${eng ? " \xB7 \u5F15\u64CE\uFF1A" + eng : ""}`));
+    if (best.asr?.state === "nokey") {
+      tone = "warn";
+      lines.push(h("div", { class: "tiny" }, "\u8FD9\u4E2A\u89C6\u9891\u6CA1\u6709\u5B57\u5E55\u3002\u8981\u81EA\u52A8\u8BC6\u522B\u8BED\u97F3\uFF0C\u9700\u8981\u5728\u8BBE\u7F6E\u91CC\u6DFB\u52A0\u652F\u6301\u8BED\u97F3\u8F6C\u5199\u7684\u5BC6\u94A5\uFF08OpenAI / Groq\uFF0C\u6216\u81EA\u5B9A\u4E49 Whisper \u63A5\u53E3\uFF09\u3002"));
+    }
+    if (best.asr?.state === "running") lines.push(h("div", { class: "tiny muted" }, `\u{1F399} \u8BED\u97F3\u8BC6\u522B\u4E2D\uFF08${best.asr.note}\uFF09\xB7 \u5DF2\u8BC6\u522B ${best.asr.lines} \u53E5\u3002\u9996\u6B21\u64AD\u653E\u5B57\u5E55\u4F1A\u665A\u51E0\u79D2\uFF0C\u518D\u770B\u5C31\u662F\u5B9E\u65F6\u7684\u3002`));
+    if (best.asr?.state === "error") {
+      tone = "warn";
+      lines.push(h("div", { class: "tiny" }, `\u8BED\u97F3\u8BC6\u522B\uFF1A${best.asr.note || best.asr.error}`));
+    }
+    if (best.asr?.state === "running" && best.asr.error) lines.push(h("div", { class: "tiny" }, `\u26A0 ${best.asr.error}`));
     if (best.tx?.state === "loading") lines.push(h("div", { class: "tiny muted" }, "\u6B63\u5728\u53D6 YouTube \u8F6C\u5199\u5E76\u6574\u7406\u6210\u53E5\u5B50\u2026"));
     if (best.tx?.state === "failed") {
       tone = "warn";
@@ -346,7 +359,8 @@
         { class: "sec checks" },
         h("label", {}, h("input", { type: "checkbox", id: "orig", checked: settings.showOrig || settings.hideSite, disabled: settings.hideSite, onChange: (e) => set({ showOrig: e.target.checked }) }), "\u540C\u65F6\u663E\u793A\u539F\u6587"),
         h("label", {}, h("input", { type: "checkbox", id: "hide", checked: settings.hideSite, onChange: (e) => set({ hideSite: e.target.checked }) }), "\u9690\u85CF\u7F51\u7AD9\u81EA\u5E26\u5B57\u5E55\uFF08\u53EA\u770B\u60AC\u6D6E\u5B57\u5E55\uFF09"),
-        h("label", { title: "\u76F4\u63A5\u53D6\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u81EA\u52A8\u751F\u6210\u6216\u4EBA\u5DE5\u5B57\u5E55\uFF09\uFF0C\u6574\u7406\u6210\u5B8C\u6574\u7684\u53E5\u5B50\u5E76\u4E0E\u64AD\u653E\u8FDB\u5EA6\u5BF9\u9F50\uFF1B\u6BD4\u8BFB\u53D6\u5C4F\u5E55\u4E0A\u6EDA\u52A8\u7684\u5B57\u5E55\u51C6\u786E\u5F97\u591A\u3002\u53D6\u4E0D\u5230\u65F6\u81EA\u52A8\u9000\u56DE\u8BFB\u5C4F\u5E55\u5B57\u5E55" }, h("input", { type: "checkbox", id: "yt", checked: settings.ytTranscript, onChange: (e) => set({ ytTranscript: e.target.checked }) }), "YouTube\uFF1A\u7528\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u63A8\u8350\uFF09")
+        h("label", { title: "\u76F4\u63A5\u53D6\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u81EA\u52A8\u751F\u6210\u6216\u4EBA\u5DE5\u5B57\u5E55\uFF09\uFF0C\u6574\u7406\u6210\u5B8C\u6574\u7684\u53E5\u5B50\u5E76\u4E0E\u64AD\u653E\u8FDB\u5EA6\u5BF9\u9F50\uFF1B\u6BD4\u8BFB\u53D6\u5C4F\u5E55\u4E0A\u6EDA\u52A8\u7684\u5B57\u5E55\u51C6\u786E\u5F97\u591A\u3002\u53D6\u4E0D\u5230\u65F6\u81EA\u52A8\u9000\u56DE\u8BFB\u5C4F\u5E55\u5B57\u5E55" }, h("input", { type: "checkbox", id: "yt", checked: settings.ytTranscript, onChange: (e) => set({ ytTranscript: e.target.checked }) }), "YouTube\uFF1A\u7528\u89C6\u9891\u81EA\u5E26\u7684\u8F6C\u5199\uFF08\u63A8\u8350\uFF09"),
+        h("label", { title: "\u89C6\u9891\u6CA1\u6709\u4EFB\u4F55\u5B57\u5E55\u65F6\uFF0C\u542C\u89C6\u9891\u7684\u58F0\u97F3\u8BC6\u522B\u6210\u5B57\u5E55\u518D\u7FFB\u8BD1\u3002\u9700\u8981\u4E00\u4E2A\u652F\u6301\u8BED\u97F3\u8F6C\u5199\u7684\u670D\u52A1\uFF08OpenAI / Groq \u7684\u5BC6\u94A5\uFF0C\u6216\u81EA\u5B9A\u4E49\u7684 Whisper \u63A5\u53E3\uFF09\uFF1B\u58F0\u97F3\u53EA\u53D1\u7ED9\u4F60\u9009\u7684\u8FD9\u4E2A\u670D\u52A1" }, h("input", { type: "checkbox", id: "asr", checked: settings.asr !== "off", onChange: (e) => set({ asr: e.target.checked ? "auto" : "off" }) }), "\u6CA1\u6709\u5B57\u5E55\u65F6\u81EA\u52A8\u8BC6\u522B\u8BED\u97F3")
       ),
       h(
         "div",

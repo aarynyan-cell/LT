@@ -106,8 +106,9 @@ export function startMock(port = PORT) {
     if (req.method === 'OPTIONS') { res.writeHead(noCors ? 403 : 204); return res.end(); }
     const chunks = [];
     for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks);
     let body = {};
-    try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch {}
+    try { body = JSON.parse(raw.toString() || '{}'); } catch {}
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/__last') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(last)); }
     // OpenAI 兼容模拟：/p/<mode>/models 与 /p/<mode>/chat/completions（可加 /nocors 前缀）
@@ -119,6 +120,17 @@ export function startMock(port = PORT) {
       (last.openai ||= []).push({ mode, rest, auth: req.headers.authorization || null, format: body.response_format?.type ?? null, tokenKeys, sysHasSchema: /JSON Schema/.test(String(body.messages?.[0]?.content || '')), model: body.model ?? null });
       res.setHeader('content-type', 'application/json');
       if (mode === 'bad') { res.writeHead(401); return res.end(JSON.stringify({ error: { message: 'invalid key' } })); }
+      // 语音转写（Whisper 兼容）：解析 multipart 里的 WAV，返回一句固定文字（按请求顺序：Phrase one/two/…），segments 时间相对这一块
+      if (rest === '/audio/transcriptions') {
+        const txt = raw.toString('latin1');
+        const at = raw.indexOf(Buffer.from('RIFF'));
+        const dv = at >= 0 ? new DataView(raw.buffer, raw.byteOffset + at) : null;
+        const sr = dv ? dv.getUint32(24, true) : 0, bytes = dv ? dv.getUint32(40, true) : 0, dur = sr ? bytes / 2 / sr : 0;
+        const n = (last.asr ||= []).length;
+        last.asr.push({ sr, dur, model: /name="model"\r\n\r\n([^\r]+)/.exec(txt)?.[1] ?? null, language: /name="language"\r\n\r\n([^\r]+)/.exec(txt)?.[1] ?? null, fmt: /name="response_format"\r\n\r\n([^\r]+)/.exec(txt)?.[1] ?? null, auth: req.headers.authorization || null, t: Date.now() });
+        if (mode === 'bad') { res.writeHead(401); return res.end('{}'); }
+        return res.end(JSON.stringify({ language: 'french', text: `Phrase ${n + 1}`, segments: [{ start: 0.1, end: Math.max(0.5, dur - 0.1), text: ` Phrase ${n + 1}`, no_speech_prob: 0.01, avg_logprob: -0.2, compression_ratio: 1.1 }] }));
+      }
       if (rest === '/models') return res.end(JSON.stringify({ data: [{ id: 'mock-large' }, { id: 'mock-small' }, { id: 'text-embedding-x' }, { id: 'deepseek-chat' }] }));
       if (rest === '/chat/completions') {
         if (mode === 'badschema' && body.response_format?.type === 'json_schema') { res.writeHead(400); return res.end(JSON.stringify({ error: { message: 'response_format json_schema is not supported' } })); }

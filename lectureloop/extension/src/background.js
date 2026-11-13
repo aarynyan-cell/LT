@@ -4,6 +4,9 @@ import { loadKeys } from './core/keys.js';
 import { translateBatch } from './core/engines.js';
 import { selection } from './core/keys.js';
 import { translateWithTM } from './core/tm.js';
+import { loadAsr } from './core/keys.js';
+import { asrSelection, transcribe } from './core/asr-api.js';
+import { fromBase64 } from './core/pcm.js';
 import { getVideo, upsertVideo, tmGetMany, tmPutMany } from './core/store.js';
 
 // 密钥放在 storage.local，限制为"受信任环境"（后台、弹窗、设置页）：网页里的内容脚本读不到
@@ -23,6 +26,20 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       } catch (e) { reply(err(e)); }
     })();
     return true; // 异步回复
+  }
+  // 语音识别：能不能用 / 识别一小段音频（密钥只在后台）
+  if (msg?.type === 'asr-config') {
+    Promise.all([loadKeys(), loadAsr()]).then(([k, a]) => { const sel = asrSelection(k, a); reply({ ok: true, available: !!sel, provider: sel?.id || '', model: sel?.model || '' }); }).catch((e) => reply(err(e)));
+    return true;
+  }
+  if (msg?.type === 'asr') {
+    (async () => {
+      try {
+        const [k, a] = await Promise.all([loadKeys(), loadAsr()]);
+        reply({ ok: true, ...(await transcribe({ sel: asrSelection(k, a), wav: fromBase64(msg.wav), language: msg.language, durSec: msg.durSec })) });
+      } catch (e) { reply(err(e)); }
+    })();
+    return true;
   }
   // 转录：内容脚本不能直接用扩展的数据库，经后台读写；写完通知侧边栏刷新
   if (msg?.type === 'tx-get') { getVideo(msg.key).then((video) => reply({ ok: true, video })).catch((e) => reply(err(e))); return true; }

@@ -391,7 +391,7 @@ getUserMedia ─┬─▶ MediaRecorder（累积 chunks）                      
 
 ## 10. 浏览器插件
 
-### 10.1 已实现：Chrome 字幕翻译插件（`extension/`，v0.1）
+### 10.1 已实现：Chrome 字幕翻译插件（`extension/`，v0.3）
 
 **定位**：读取网页里**已有的字幕** → 翻译 → 悬浮显示。不做音频识别，不依赖 Web 应用的数据（IndexedDB）。
 
@@ -433,6 +433,20 @@ Manifest V3
 
 **控制器的接入点**：`_checkVideo()` 每个 tick 计算视频 key，变了就换一份转录并经 `tx-get` 读出已保存的（`_seedFromLines()` 把有译文的句子放进翻译队列的缓存）；`_loadTrack()` 在轨道整条载入时 `loadAll`；`_record()` 在每句稳定后记录并拿到 `curLineId`（状态上报，侧边栏据此高亮）；`_flushSoon()` 每 2 s 把变化的行经 `tx-upsert` 发给后台；`seek` / `setLoop`（rAF）/ `translateAll` 响应侧边栏的指令。
 
+**v0.3 新增：YouTube 转写与语音识别**
+
+| 模块 | 职责 |
+|---|---|
+| `captions.js`（纯） | 解析 `timedtext`：`parseJson3`（自动字幕带逐词 `tOffsetMs`）、`parseXml`（srv1 `<text start dur>` 与 srv3 `<p t d><s t>`，实体二次解码）；`cuesFromPanel`/`parseTimestamp`（转写面板）；`extractCaptionTracksFromHtml`（括号配对取 `"captionTracks"`，容忍字符串里的括号）；`pickTrack`（同语言人工 > 自动生成 > 第一条）；`isYouTubeUrl`（只允许 youtube.com） |
+| `segment.js`（纯） | `cuesToWords`（词序列 + 每个词之前的静音 `gap`；去滚动重复；忽略 `[Music]` `♪`）、`segmentSentences`（标点 → 停顿 → 超限再切 → 碎片并入 → 补标点/大写；时间取自词）、`cuesToSentences` |
+| `yt.js`（内容） | `loadYouTubeTranscript`：`askPlayerData`（向 MAIN 世界的小脚本 `postMessage` 要轨道列表，校验 videoId）→ 取轨道 timedtext → `observedTimedtextUrl`（复用播放器自己请求过的地址，带校验参数）→ 页面 HTML → `scrapePanel`（新旧组件结构 + 按文字/aria-label 找按钮）；取到 cue 后断句，返回 `{lines, lang, kind, name}` |
+| `yt-main.js` | **MAIN 世界**内容脚本（manifest `world: "MAIN"`，仅 youtube.com / youtube-nocookie.com）：监听 `lectureloop:yt-request`，把 `movie_player.getPlayerResponse()`（或 `ytInitialPlayerResponse`）里的轨道列表回传。内容脚本在隔离世界读不到页面 JS 变量，所以需要它 |
+| `pcm.js`（纯） | `Resampler`（盒式平均，流式）、`Chunker`（20 ms 帧能量 VAD + 自适应噪声底；停顿切块；倍速按视频时间算；`flush`）、`encodeWav`、`toBase64`/`fromBase64`（消息只能传 JSON，音频用 base64） |
+| `asr.js`（内容） | `AsrSession`：`video.captureStream()` → `AudioContext` + `ScriptProcessor`（不需要 worklet 文件，不向网页暴露扩展资源）→ 重采样 → `Chunker`；检测拖动进度条（flush）与持续静音（DRM） |
+| `asr-api.js`（后台） | `asrSelection`（OpenAI / Groq / 自定义；自定义必须有模型名）、`transcribe`（multipart `POST {base}/audio/transcriptions`，`verbose_json`）、`cleanSegments`（幻听套话、`no_speech_prob`、压缩比） |
+
+**控制器的接入**：`sources.js` 新增 `linesCandidate`（按 `video.currentTime` 二分取当前句；`exclusive`：转录就绪后没有当前句就是没有，不退回读屏幕字幕；语音识别的 `recent` 句在到达后 7 秒内继续显示）。`_wantTranscript/_loadTranscript` 取并整理 YouTube 转写（`recorder.replaceAll` + `tx-upsert` 的 `replace` 标志，已保存的旧屏幕字幕记录作废、译文按文字沿用）；`_maybeAsr/_startAsr/_asrChunk/_covered/_addAsr` 管语音识别（没有来源满 4 秒才启动；`asr-config` 询问后台是否有可用服务；覆盖 ≥ 60% 的块不发送；同时在途 ≤ 2，来不及就丢块）；状态里新增 `tx`（取转写的状态与原因）与 `asr`。
+
 **后台模块**：`engines.js`（`translateGtx`：每句一个请求、最多 4 并发；`translateBatch`：auto = llm → gtx，带降级说明 `note`）· `llm.js`（Anthropic 原生 `fetch` 非流式 + 逐级降级；其它走共享的 `askJsonOpenAI`；`probeKey` 识别并验证密钥）· `keys.js`（`chrome.storage.local` 的多服务商密钥，`selection()` 优先用快速模型）。
 
 **消息协议**
@@ -443,6 +457,8 @@ Manifest V3
 | `status` | 内容 → 后台 | 写入 `storage.session['st:<tab>:<frame>']`；`on:false` 时删除 |
 | `setEnabled` / `pick` / `pickCancel` / `ping` | 弹窗/后台 → 内容 | 开关、进入/退出选取模式、探活 |
 | `pickDone` | 内容 → 后台 | 选取结束，后台通知同一标签页的其他框架退出选取模式 |
+| `asr-config` / `asr` | 内容 → 后台 | 询问能否语音识别（有没有可用服务）/ 识别一块音频（`{wav: base64, durSec, language}` → `{segments, language}`） |
+| `reloadTranscript` | 侧边栏 → 内容 | 重新取并整理 YouTube 转写（只有 YouTube 的框架回复） |
 | `tx-get` / `tx-upsert` | 内容 → 后台 | 读取 / 合并保存某个视频的转录（内容脚本不能直接用扩展的数据库）；写完后台广播 `tx-updated`，侧边栏据此刷新 |
 | `seek` / `loop` / `loopClear` / `translateAll` | 侧边栏 → 内容 | 跳转、循环一句、取消循环、翻译全部；**只有有视频的那个框架回复** |
 | `translate`（扩展） | 内容/侧边栏 → 后台 | 现在经 `translateWithTM`：先查翻译记忆；结果里多了 `cached` |
@@ -453,8 +469,8 @@ Manifest V3
 
 | 层 | 内容 |
 |---|---|
-| `node:test`（`tests/ext.test.mjs`） | **转录合并 / 记录器（轨道载入、DOM 边播边记、循环复用、滚动字幕）/ 视频 key / 分词与词频 / 翻译记忆（命中、写回、AI 质量重翻、写失败）**；语言判断；稳定器（假定时器）；队列（合并/去重/缓存/失败重试/bg 暂停/提升）；`translateGtx`；Anthropic 降级链；`translateLLM` 两条路径；`translateBatch` 降级与说明；`probeKey`；设置归一化；`siteOf`；密钥存取；`Controller._lineInfo`；**构建产物与 zip 是否最新**；manifest 引用的文件都存在 |
-| Playwright（`tests/e2e/extension.cjs`） | 用 `launchPersistentContext` 加载未打包的扩展；本地测试页（`ext-server.cjs`：60 秒静音 WAV + 由字幕表生成的 WebVTT + 仿制的 YouTube / Netflix / 自定义字幕层）+ 模拟翻译服务（`mock-api.mjs`）。用 `--host-resolver-rules` 把 `www.youtube.com` / `www.netflix.com` 映射到本机，让站点适配真正匹配。覆盖：**侧边栏**（整条轨道一次性列出、译文逐步出现、点句跳转、当前句高亮、循环一句、单词卡与红/黄/绿、句子四色、按颜色筛选、导出 TSV、刷新后保留、删除、**循环/刷新后零翻译请求**、空状态）、**设置页清除按钮**；字幕轨道自动开启与预翻译、中文句不翻译、隐藏网站字幕与恢复、YouTube/Netflix 结构、弹窗开关与手动选取并记住、设置页保存密钥→选模型→测试→改用 AI、AI 失败降级、限流提示、悬浮层字号/拖动/刷新保持/关闭、全屏挂载、不支持的页面、删除密钥、**内容脚本读不到密钥** |
+| `node:test`（`tests/ext.test.mjs`） | **YouTube 转写解析与断句（json3/XML/面板/HTML、选轨道、无标点自动字幕还原句子与时间）、语音识别（重采样、切块与倍速、WAV、`asrSelection`、`cleanSegments`、`transcribe`）**；**转录合并 / 记录器（轨道载入、DOM 边播边记、循环复用、滚动字幕）/ 视频 key / 分词与词频 / 翻译记忆（命中、写回、AI 质量重翻、写失败）**；语言判断；稳定器（假定时器）；队列（合并/去重/缓存/失败重试/bg 暂停/提升）；`translateGtx`；Anthropic 降级链；`translateLLM` 两条路径；`translateBatch` 降级与说明；`probeKey`；设置归一化；`siteOf`；密钥存取；`Controller._lineInfo`；**构建产物与 zip 是否最新**；manifest 引用的文件都存在 |
+| Playwright（`tests/e2e/extension.cjs`） | 用 `launchPersistentContext` 加载未打包的扩展；本地测试页（`ext-server.cjs`：60 秒静音 WAV + 由字幕表生成的 WebVTT + 仿制的 YouTube / Netflix / 自定义字幕层）+ 模拟翻译服务（`mock-api.mjs`）。用 `--host-resolver-rules` 把 `www.youtube.com` / `www.netflix.com` 映射到本机，让站点适配真正匹配。覆盖：**YouTube 转写**（MAIN 世界桥 → timedtext json3、字幕接口返回空内容时读转写面板并关回去、页面脚本拿不到数据时取页面 HTML、没有转写时退回读屏幕字幕且弹窗有原因、可关闭、刷新后不再取字幕/不再翻译；用仿制的 `/watch` 页面 + 把 `www.youtube.com` 映射到本机）、**语音识别**（60 秒内 3 段"说话"的 WAV 经 `captureStream` 切块、只送去有人说话的块、时间对得上、重看不重复识别、没有密钥/关闭/静音的行为）、**侧边栏**（整条轨道一次性列出、译文逐步出现、点句跳转、当前句高亮、循环一句、单词卡与红/黄/绿、句子四色、按颜色筛选、导出 TSV、刷新后保留、删除、**循环/刷新后零翻译请求**、空状态）、**设置页清除按钮**；字幕轨道自动开启与预翻译、中文句不翻译、隐藏网站字幕与恢复、YouTube/Netflix 结构、弹窗开关与手动选取并记住、设置页保存密钥→选模型→测试→改用 AI、AI 失败降级、限流提示、悬浮层字号/拖动/刷新保持/关闭、全屏挂载、不支持的页面、删除密钥、**内容脚本读不到密钥** |
 | **未覆盖** | 真实的 Netflix / YouTube / Prime / 哔哩哔哩（开发环境访问不了）；真实的非 Anthropic 服务商；Chrome 内置 Translator 的真实模型；Alt+T 快捷键（浏览器级，Playwright 无法触发） |
 
 ### 10.3 已知局限与设计取舍
@@ -466,9 +482,11 @@ Manifest V3
 - 站点选择器会随网站改版失效——这是"手动选取"和"字幕轨道"两条路存在的原因。
 - 网站 DOM 字幕只能边播边记：第一遍播放时侧边栏随播放增长，第二遍起完整；YouTube 自动字幕的滚动文本做了"以上一句开头就延长"的去重，仍可能有重复句。
 - 已保存的译文不随引擎升级（之后填了 AI 密钥，旧视频仍显示旧译文）；设置页可清除。翻译记忆会对"免费翻译质量"条目在用 AI 时重翻。
+- **没有在真实 YouTube 上验证**：开发环境访问不了。取转写的三条路径、转写面板的选择器（`ytd-transcript-segment-renderer` `.segment-timestamp` `.segment-text`、`ytd-video-description-transcript-section-renderer button`）、timedtext 可能要求播放器才有的校验参数（返回空内容）——都是 YouTube 的内部实现。转写面板里只有每段的开始时间、没有逐词时间，断句比 json3 粗。
+- 语音识别：音频发给第三方服务（用户自己选）、有成本、首次播放有延迟；`ScriptProcessor` 在主线程处理（4096 帧一次，开销很小，但属已弃用 API）；浏览器策略可能让 `AudioContext` 处于 suspended（需要页面上有过用户操作）。
 - `chrome.sidePanel.open` 需要用户手势，Playwright 无法点真实的工具栏按钮，所以端到端测试把侧边栏页面当普通标签页打开（`?tabId=`）；真实侧边栏的打开与跟随标签页切换没有自动化覆盖。
 
-### 10.4 第二阶段（未做）：无字幕视频的音频识别
+### 10.4 无字幕视频的音频识别（v0.3 已做第一版；本节记录设计与后续）
 
 ```
 offscreen document：chrome.tabCapture.getMediaStreamId → getUserMedia(chromeMediaSource:'tab')
@@ -476,7 +494,7 @@ offscreen document：chrome.tabCapture.getMediaStreamId → getUserMedia(chromeM
    → 句子（复用 Web 应用的 UtteranceTracker）→ 现有的 TranslateQueue / Overlay
 ```
 
-可直接复用：`utterance.js`（稳定前缀提交）、翻译队列、悬浮层、引擎降级。需新增：`TabCaptureSource`、ASR Provider、`tabCapture` 权限与 offscreen document。**在确认需求（PRD 开放问题 6）前不做。**
+**已实现的是更简单的变体**：不用 `tabCapture` / offscreen，而是在内容脚本里 `video.captureStream()` → `ScriptProcessor` → 切块 → 后台调用 Whisper 兼容接口（见上面的 `asr.js` / `pcm.js` / `asr-api.js`）。好处：不需要用户手势、不需要新权限、不会让视频静音。限制：DRM 加密流与无 CORS 的跨域媒体取到的是静音；首次播放字幕晚 4–10 秒（等说完 + 上传 + 识别）。后续可做：`tabCapture` 作为 `captureStream` 取不到声音时的备用；流式 ASR（Deepgram / Azure）降低延迟；本机离线识别（Chrome 本机模型 / whisper.cpp）；识别结果再用 LLM 断句/加标点。
 
 ### 10.5 与 Web 应用的关系（第三阶段设想）
 

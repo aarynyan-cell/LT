@@ -117,7 +117,9 @@ function linesCandidate(doc, getTx) {
       if (!tx?.lines?.length) return null;
       const video = pickVideo(doc);
       if (!video) return null;
-      const l = findLineAt(tx.lines, video.currentTime);
+      let l = findLineAt(tx.lines, video.currentTime);
+      // 语音识别的句子比说话晚几秒才出来：刚识别出来的这句，在它之后的几秒内继续显示，而不是等视频播放位置"回头"
+      if (!l && tx.recent && Date.now() - tx.recent.at < 7000 && video.currentTime >= tx.recent.line.start) l = tx.recent.line;
       return l ? { text: l.text, lang: tx.lang || l.lang || null, video, rolling: false, lineId: l.id } : null;
     },
     upcoming(n = 30, ahead = 90) {

@@ -5,6 +5,7 @@ export const DEFAULTS = {
   engine: 'auto',        // auto（有密钥用 AI，否则 Google 免费，再不行用 Chrome 内置） | llm | gtx | chrome
   showOrig: false,       // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
   hideSite: false,       // 隐藏网站自带字幕，只显示悬浮层
+  asr: 'auto',           // 没有任何字幕时自动识别语音：auto | off（需要支持语音转写的服务商密钥）
   ytTranscript: true,    // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
   fontScale: 1,
   bg: 0.55,
@@ -22,7 +23,7 @@ export function normalize(raw = {}) {
   s.targets = [...new Set((Array.isArray(s.targets) ? s.targets : [s.targets]).filter((t) => ['zh', 'en', 'fr'].includes(t)))].slice(0, 2);
   if (!s.targets.length) s.targets = ['zh'];
   s.engine = ['auto', 'llm', 'gtx', 'chrome'].includes(s.engine) ? s.engine : 'auto';
-  s.showOrig = !!s.showOrig; s.hideSite = !!s.hideSite; s.ytTranscript = s.ytTranscript !== false;
+  s.showOrig = !!s.showOrig; s.hideSite = !!s.hideSite; s.ytTranscript = s.ytTranscript !== false; s.asr = s.asr === 'off' ? 'off' : 'auto';
   s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
   s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
   s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;

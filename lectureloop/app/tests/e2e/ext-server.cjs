@@ -21,6 +21,24 @@ function wav(seconds = 60, rate = 8000) {
   return b;
 }
 const WAV = wav();
+function speechWav(seconds = 30, rate = 16000) {
+  const n = seconds * rate, b = Buffer.alloc(44 + n * 2);
+  b.write('RIFF', 0); b.writeUInt32LE(36 + n * 2, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(n * 2, 40);
+  const bursts = [[1.0, 3.4], [6.0, 9.2], [14.0, 16.5]];
+  for (let i = 0; i < n; i++) {
+    const t = i / rate, on = bursts.some(([a, c]) => t >= a && t < c);
+    const v = on ? 0.28 * (Math.sin(2 * Math.PI * 220 * t) + 0.5 * Math.sin(2 * Math.PI * 440 * t)) * (0.75 + 0.25 * Math.sin(2 * Math.PI * 3.5 * t)) : 0;
+    b.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+  }
+  return b;
+}
+const SPEECH = speechWav();
+function serveBuf(req, res, buf, type) {
+  const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
+  if (m) { const a = +m[1], e = m[2] ? +m[2] : buf.length - 1; res.writeHead(206, { 'content-type': type, 'accept-ranges': 'bytes', 'content-range': `bytes ${a}-${e}/${buf.length}`, 'content-length': e - a + 1 }); return res.end(buf.subarray(a, e + 1)); }
+  res.writeHead(200, { 'content-type': type, 'accept-ranges': 'bytes', 'content-length': buf.length }); return res.end(buf);
+}
 
 function start(port = 8799) {
   const srv = http.createServer((req, res) => {
@@ -44,6 +62,7 @@ function start(port = 8799) {
     if (u.pathname === '/__hits') { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify(hits)); }
     if (u.pathname === '/page.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(__dirname, 'ext-pages/page.html'), 'utf8').replace('__YT_DATA__', 'null')); }
     if (u.pathname === '/fr.vtt') { res.writeHead(200, { 'content-type': 'text/vtt; charset=utf-8' }); return res.end(VTT); }
+    if (u.pathname === '/speech.wav') return serveBuf(req, res, SPEECH, 'audio/wav');
     if (u.pathname === '/silence.wav') {
       const m = /bytes=(\d+)-(\d*)/.exec(req.headers.range || '');
       if (m) {

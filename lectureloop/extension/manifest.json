@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "LectureLoop 字幕翻译",
   "short_name": "字幕翻译",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "看网页视频时实时翻译字幕：法语 / 英语 / 中文互译。支持 YouTube、Netflix 等站点的字幕、视频字幕轨道，以及手动选取字幕位置。",
   "minimum_chrome_version": "116",
   "icons": {

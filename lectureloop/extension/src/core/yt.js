@@ -35,21 +35,34 @@ async function fetchCues(baseUrl, fetchFn) {
   return [];
 }
 
+/** 播放器自己请求过本视频的字幕（打开 CC 时）：它的地址带着播放器才有的校验参数，直接复用 */
+export function observedTimedtextUrl(win, videoId) {
+  try {
+    const e = win.performance.getEntriesByType('resource').filter((x) => x.name.includes('timedtext') && x.name.includes(`v=${videoId}`) && isYouTubeUrl(x.name));
+    return e.length ? e[e.length - 1].name : '';
+  } catch { return ''; }
+}
+
 /** 打开页面自带的"转写文字"面板并读出每一行；读完把面板关回去 */
+// YouTube 正在把组件迁移成 view-model：新旧两种结构都认
+const SEG = 'ytd-transcript-segment-renderer, transcript-segment-view-model';
+const TS = '.segment-timestamp, .ytwTranscriptSegmentViewModelTimestamp, [class*="TranscriptSegmentViewModelTimestamp"]';
+const TX = '.segment-text, .yt-core-attributed-string, [class*="TranscriptSegmentViewModelText"]';
+const TX_BTN = /transcript|transcription|转写|转录|文字记录|transcripción/i;
 export async function scrapePanel(doc, { wait = 6000 } = {}) {
-  const SEG = 'ytd-transcript-segment-renderer';
   let opened = false;
   if (!doc.querySelector(SEG)) {
-    const btn = doc.querySelector('ytd-video-description-transcript-section-renderer button, ytd-video-description-transcript-section-renderer ytd-button-renderer button');
+    let btn = doc.querySelector('ytd-video-description-transcript-section-renderer button');
+    if (!btn) btn = [...doc.querySelectorAll('#description button, ytd-watch-metadata button, #above-the-fold button')].find((b) => TX_BTN.test(b.getAttribute('aria-label') || '') || TX_BTN.test(b.textContent || ''));
     if (!btn) return [];
     btn.click(); opened = true;
     for (let t = 0; t < wait && !doc.querySelector(SEG); t += 200) await sleep(200);
   }
   const rows = [...doc.querySelectorAll(SEG)].map((el) => ({
-    t: parseTimestamp(el.querySelector('.segment-timestamp')?.textContent),
-    text: el.querySelector('.segment-text')?.textContent || '',
+    t: parseTimestamp(el.querySelector(TS)?.textContent),
+    text: el.querySelector(TX)?.textContent || '',
   }));
-  if (opened) doc.querySelector('ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"] #visibility-button button')?.click();
+  if (opened) doc.querySelector('ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"] #visibility-button button, [target-id="engagement-panel-searchable-transcript"] [aria-label="Close"], [target-id="engagement-panel-searchable-transcript"] #visibility-button button')?.click();
   return cuesFromPanel(rows);
 }
 
@@ -71,6 +84,10 @@ export async function loadYouTubeTranscript({ win, doc, videoId, settings = {}, 
 
   let cues = [], kind = choice?.kind, lang = choice?.lang, name = choice?.name || '';
   if (choice) cues = await fetchCues(choice.track.baseUrl, fetchFn);
+  if (!cues.length) { // 轨道地址取不到：试试播放器自己请求过的地址
+    const seen = observedTimedtextUrl(win, videoId);
+    if (seen) { cues = await fetchCues(seen, fetchFn); if (cues.length) { const l = new URL(seen).searchParams.get('lang') || ''; kind ||= new URL(seen).searchParams.get('kind') === 'asr' ? 'asr' : 'manual'; lang ||= l.slice(0, 2).toLowerCase() || undefined; name = '播放器请求过的字幕'; } }
+  }
   if (!cues.length) { // 轨道列表里没有 / 取到的是空的：读"转写文字"面板
     cues = await scrapePanel(doc);
     if (cues.length) { kind = 'panel'; name = '转写文字面板'; lang = settings.source && settings.source !== 'auto' ? settings.source : null; }

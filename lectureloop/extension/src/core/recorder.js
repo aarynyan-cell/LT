@@ -20,6 +20,12 @@ export class Recorder {
     for (const l of this.lines) if (!before.has(l.id) || before.get(l.id) !== l.end + '|' + l.text) this.dirty.add(l.id);
   }
 
+  /** 追加已识别的句子（语音识别）：按 id 合并 */
+  addLines(lines) {
+    this.lines = mergeLines(this.lines, lines);
+    for (const l of lines) this.dirty.add(l.id);
+  }
+
   /** 用整份新的转录替换（YouTube 转写整理好之后）：旧的网站字幕记录作废，已有的译文按文字沿用 */
   replaceAll(lines) {
     const old = new Map(this.lines.filter((l) => l.tr).map((l) => [norm(l.text), l.tr]));

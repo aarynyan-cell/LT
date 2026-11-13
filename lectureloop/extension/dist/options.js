@@ -153,6 +153,8 @@
     await c.storage.local.set({ keys, use: use === id ? Object.keys(keys)[0] || "" : use });
   }
   var setUse = (id, c = globalThis.chrome) => c.storage.local.set({ use: id });
+  var loadAsr = async (c = globalThis.chrome) => (await c.storage.local.get("asr")).asr || {};
+  var saveAsr = (asr, c = globalThis.chrome) => c.storage.local.set({ asr });
   function selection({ keys, use }) {
     const e = keys?.[use];
     const provider = PROVIDERS[use];
@@ -169,6 +171,18 @@
       this.status = status;
     }
   };
+
+  // ../extension/src/core/asr-api.js
+  var ASR_PROVIDERS = { openai: { model: "whisper-1" }, groq: { model: "whisper-large-v3-turbo" }, custom: { model: "" } };
+  function asrSelection({ keys = {}, use = "" }, asr = {}) {
+    const capable = Object.keys(keys).filter((id2) => ASR_PROVIDERS[id2]);
+    const id = capable.includes(asr.use) ? asr.use : capable[0];
+    if (!id) return null;
+    const e = keys[id];
+    const model = id === asr.use && asr.model || e.asrModel || ASR_PROVIDERS[id].model;
+    if (!model) return null;
+    return { id, key: e.key, model, base: e.base || PROVIDERS[id].base };
+  }
 
   // public/js/lib/ai-tasks.js
   function parseLooseJson(text) {
@@ -457,6 +471,8 @@ ${JSON.stringify(schema)}`;
     // 悬浮层里同时显示原文（"隐藏网站字幕"开启时总是显示）
     hideSite: false,
     // 隐藏网站自带字幕，只显示悬浮层
+    asr: "auto",
+    // 没有任何字幕时自动识别语音：auto | off（需要支持语音转写的服务商密钥）
     ytTranscript: true,
     // YouTube：优先使用视频自带的转写（整句、与播放进度对齐），而不是读取屏幕上滚动的字幕
     fontScale: 1,
@@ -480,6 +496,7 @@ ${JSON.stringify(schema)}`;
     s.showOrig = !!s.showOrig;
     s.hideSite = !!s.hideSite;
     s.ytTranscript = s.ytTranscript !== false;
+    s.asr = s.asr === "off" ? "off" : "auto";
     s.fontScale = clamp(+s.fontScale || 1, 0.5, 2.5);
     s.bg = clamp(Number.isFinite(+s.bg) ? +s.bg : 0.55, 0, 1);
     s.pos = s.pos && Number.isFinite(s.pos.cx) && Number.isFinite(s.pos.by) ? { cx: clamp(s.pos.cx, 0, 1), by: clamp(s.pos.by, 0.05, 1) } : null;
@@ -535,7 +552,9 @@ ${JSON.stringify(schema)}`;
   var msg = null;
   var busy = false;
   var dbStats = null;
+  var asrCfg = {};
   var refresh = async () => {
+    asrCfg = await loadAsr();
     state = await loadKeys();
     dbStats = await stats().catch(() => null);
     render();
@@ -661,6 +680,37 @@ ${JSON.stringify(schema)}`;
             } }, "\u5220\u9664")
           );
         }) : h("div", { class: "muted" }, "\u8FD8\u6CA1\u6709\u3002")
+      ),
+      h(
+        "div",
+        { class: "card" },
+        h("h2", {}, "\u8BED\u97F3\u8BC6\u522B\uFF08\u89C6\u9891\u6CA1\u6709\u5B57\u5E55\u65F6\uFF09"),
+        (() => {
+          const capable = Object.keys(state.keys).filter((id) => ASR_PROVIDERS[id]);
+          const sel = asrSelection(state, asrCfg);
+          if (!capable.length) return h("div", { class: "muted", id: "asr-none" }, "\u89C6\u9891\u6CA1\u6709\u4EFB\u4F55\u5B57\u5E55\u65F6\uFF0C\u63D2\u4EF6\u53EF\u4EE5\u542C\u89C6\u9891\u7684\u58F0\u97F3\u8BC6\u522B\u6210\u5B57\u5E55\u518D\u7FFB\u8BD1\u3002\u8FD9\u9700\u8981\u4E00\u4E2A\u652F\u6301\u201C\u8BED\u97F3\u8F6C\u5199\uFF08Whisper\uFF09\u201D\u7684\u670D\u52A1\uFF1A\u5728\u4E0A\u9762\u6DFB\u52A0 OpenAI \u6216 Groq \u7684\u5BC6\u94A5\uFF08\u6216\u586B\u5199\u81EA\u5B9A\u4E49\u7684 Whisper \u63A5\u53E3\u5730\u5740\uFF09\u5373\u53EF\u3002Anthropic / DeepSeek \u7B49\u6CA1\u6709\u8BED\u97F3\u8F6C\u5199\uFF0C\u4E0D\u80FD\u7528\u4E8E\u8FD9\u91CC\u3002");
+          return h(
+            "div",
+            { class: "col" },
+            h(
+              "div",
+              { class: "row" },
+              h("select", { id: "asr-use", "aria-label": "\u8BED\u97F3\u8BC6\u522B\u670D\u52A1", onChange: async (e) => {
+                await saveAsr({ ...asrCfg, use: e.target.value, model: "" });
+                await refresh();
+              } }, capable.map((id) => h("option", { value: id, selected: sel?.id === id }, PROVIDERS[id].name))),
+              h("input", { type: "text", id: "asr-model", "aria-label": "\u8BED\u97F3\u8BC6\u522B\u6A21\u578B", placeholder: "\u6A21\u578B\uFF08" + (sel ? ASR_PROVIDERS[sel.id].model || "\u5FC5\u586B" : "") + "\uFF09", value: sel?.id === asrCfg.use && asrCfg.model || state.keys[sel?.id]?.asrModel || "", style: "max-width:220px", onChange: async (e) => {
+                const v = e.target.value.trim();
+                if (sel) {
+                  await saveKey(sel.id, { asrModel: v });
+                  await saveAsr({ ...asrCfg, use: sel.id, model: v });
+                  await refresh();
+                }
+              } })
+            ),
+            h("div", { class: "tiny muted" }, sel ? `\u5F53\u524D\uFF1A${PROVIDERS[sel.id].name} \xB7 ${sel.model}\u3002\u8BC6\u522B\u6309\u201C\u4E00\u53E5\u8BDD\u4E00\u5757\u201D\u7684\u97F3\u9891\u53D1\u9001\uFF08\u53EA\u53D1\u9001\u6709\u4EBA\u8BF4\u8BDD\u7684\u90E8\u5206\uFF09\uFF0C\u58F0\u97F3\u53EA\u53D1\u7ED9\u8FD9\u4E2A\u670D\u52A1\u3002` : "\u81EA\u5B9A\u4E49\u5730\u5740\u9700\u8981\u586B\u5199\u6A21\u578B\u540D\u540E\u624D\u80FD\u4F7F\u7528\u3002")
+          );
+        })()
       ),
       h(
         "div",

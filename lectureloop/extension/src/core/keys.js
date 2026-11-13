@@ -18,6 +18,10 @@ export async function removeKey(id, c = globalThis.chrome) {
 }
 export const setUse = (id, c = globalThis.chrome) => c.storage.local.set({ use: id });
 
+/** 语音识别用哪个服务商 / 模型：{ use, model }（可选；没设就自动选第一个能做语音识别的） */
+export const loadAsr = async (c = globalThis.chrome) => (await c.storage.local.get('asr')).asr || {};
+export const saveAsr = (asr, c = globalThis.chrome) => c.storage.local.set({ asr });
+
 /** 当前用于翻译的服务商：{ id, provider, key, model, base } 或 null。优先用"快速模型"（字幕要的是延迟，不是推理深度） */
 export function selection({ keys, use }) {
   const e = keys?.[use];

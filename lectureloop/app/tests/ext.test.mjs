@@ -20,6 +20,8 @@ import { tokenize, wordKey, wordStats, isStop } from '../../extension/src/core/w
 import { translateWithTM, tmKey } from '../../extension/src/core/tm.js';
 import { parseJson3, parseXml, cuesFromPanel, parseTimestamp, extractCaptionTracksFromHtml, pickTrack, withFormat, isYouTubeUrl, decodeEntities } from '../../extension/src/core/captions.js';
 import { cuesToWords, segmentSentences, cuesToSentences } from '../../extension/src/core/segment.js';
+import { Resampler, Chunker, encodeWav, toBase64, fromBase64, rms } from '../../extension/src/core/pcm.js';
+import { asrSelection, cleanSegments, transcribe } from '../../extension/src/core/asr-api.js';
 import { subtitleTask } from '../public/js/lib/ai-tasks.js';
 import { bundle, manifest, packageFiles, zipFiles } from '../tools/build-ext.mjs';
 
@@ -526,6 +528,100 @@ test('cuesToWords：滚动字幕（下一个 cue 重复上一个的结尾）只�
 test('segmentSentences：中文按字数与标点', () => {
   const s = cuesToSentences([{ start: 0, end: 4, text: '我不知道你想要什么。已经太晚了' }, { start: 4, end: 6, text: '我们走吧' }], 'zh');
   assert.ok(s.length >= 2); assert.ok(s[0].text.startsWith('我不知道')); assert.ok(s.every((x) => /[。！？]$/.test(x.text)));
+});
+
+// ---------- 语音识别：音频切块 / 编码 / 接口 ----------
+const tone = (sec, sr, amp = 0.3, hz = 300) => Float32Array.from({ length: Math.round(sec * sr) }, (_, i) => amp * Math.sin((2 * Math.PI * hz * i) / sr) * (1 + 0.3 * Math.sin(i / 900)));
+const silence = (sec, sr) => new Float32Array(Math.round(sec * sr));
+const cat = (...a) => { const o = new Float32Array(a.reduce((n, x) => n + x.length, 0)); let k = 0; for (const x of a) { o.set(x, k); k += x.length; } return o; };
+
+test('Resampler：48k → 16k 长度正确，分多次喂结果与一次喂一致，正弦波能量保留', () => {
+  const x = tone(1, 48000);
+  const a = new Resampler(48000, 16000).process(x);
+  assert.ok(Math.abs(a.length - 16000) <= 2, '长度 ' + a.length);
+  const r = new Resampler(48000, 16000); const parts = [];
+  for (let i = 0; i < x.length; i += 4096) parts.push(r.process(x.subarray(i, i + 4096)));
+  const b = cat(...parts);
+  assert.ok(Math.abs(b.length - a.length) <= 2);
+  for (let i = 100; i < 500; i++) assert.ok(Math.abs(a[i] - b[i]) < 1e-6, '分块与整块一致');
+  assert.ok(Math.abs(rms(a) - rms(x)) / rms(x) < 0.15, '能量基本保留');
+  const c = new Resampler(44100, 16000).process(tone(1, 44100));
+  assert.ok(Math.abs(c.length - 16000) <= 2, '44.1k 也行：' + c.length);
+});
+
+test('Chunker：在停顿处切块，开始/结束时间与说话时间吻合；纯静音不产生块；过短的杂音丢弃', () => {
+  const sr = 16000, chunks = [];
+  const ch = new Chunker({ onChunk: (c) => chunks.push(c) });
+  // 0–1s 静音 | 1–3.4s 说话 | 3.4–6s 静音 | 6–9s 说话 | 9–10s 静音 | 0.1s 点击声 | 11–12s 静音
+  const sig = cat(silence(1, sr), tone(2.4, sr), silence(2.6, sr), tone(3, sr), silence(1, sr), tone(0.1, sr), silence(1.5, sr));
+  for (let i = 0; i < sig.length; i += 4096) ch.push(sig.subarray(i, i + 4096), i / sr, 1);
+  ch.flush();
+  assert.equal(chunks.length, 2, '两句话两块：' + chunks.map((c) => [c.start.toFixed(2), c.end.toFixed(2)]));
+  assert.ok(Math.abs(chunks[0].start - 0.75) < 0.1 && Math.abs(chunks[0].end - 3.6) < 0.25, `第一块 ${chunks[0].start}-${chunks[0].end}`);
+  assert.ok(Math.abs(chunks[1].start - 5.75) < 0.1 && Math.abs(chunks[1].end - 9.2) < 0.25, `第二块 ${chunks[1].start}-${chunks[1].end}`);
+  assert.ok(chunks[0].speechSec > 2 && chunks[0].pcm.length / sr > 2.4);
+  const none = []; const c2 = new Chunker({ onChunk: (c) => none.push(c) });
+  c2.push(silence(5, sr), 0); c2.flush();
+  assert.equal(none.length, 0);
+});
+test('Chunker：连续说话超过上限时强制切开；倍速播放时时间按视频时间算；拖动进度条（flush）丢弃前一块的尾巴', () => {
+  const sr = 16000, chunks = [];
+  const ch = new Chunker({ onChunk: (c) => chunks.push(c) });
+  const sig = tone(30, sr);
+  for (let i = 0; i < sig.length; i += 4096) ch.push(sig.subarray(i, i + 4096), i / sr, 1);
+  ch.flush();
+  assert.ok(chunks.length >= 3 && chunks.every((c) => c.pcm.length / sr <= 12.05), chunks.map((c) => c.pcm.length / sr).join(','));
+  assert.ok(chunks.slice(1).every((c, i) => Math.abs(c.start - chunks[i].end) < 0.1), '块首尾相接');
+  const fast = []; const c2 = new Chunker({ onChunk: (c) => fast.push(c) });
+  const s2 = cat(silence(0.5, sr), tone(3, sr), silence(1, sr));
+  for (let i = 0; i < s2.length; i += 4096) c2.push(s2.subarray(i, i + 4096), 10 + (i / sr) * 2, 2); // 2 倍速：1 秒音频 = 2 秒视频
+  c2.flush();
+  assert.equal(fast.length, 1);
+  assert.ok(Math.abs(fast[0].start - (10 + 2 * 0.25)) < 0.3 && Math.abs((fast[0].end - fast[0].start) - 2 * (fast[0].pcm.length / sr)) < 0.01, `倍速：${fast[0].start} ${fast[0].end}`);
+});
+test('encodeWav / base64：WAV 头正确，往返一致', () => {
+  const w = encodeWav(tone(0.5, 16000), 16000), dv = new DataView(w.buffer);
+  assert.equal(String.fromCharCode(...w.slice(0, 4)), 'RIFF'); assert.equal(String.fromCharCode(...w.slice(8, 12)), 'WAVE');
+  assert.equal(dv.getUint32(24, true), 16000); assert.equal(dv.getUint16(22, true), 1); assert.equal(dv.getUint16(34, true), 16);
+  assert.equal(dv.getUint32(40, true), 8000 * 2); assert.equal(w.length, 44 + 16000);
+  assert.deepEqual([...fromBase64(toBase64(w))], [...w]);
+});
+
+test('asrSelection：只在能做语音识别的服务商里选；指定优先；自定义必须填模型', () => {
+  const k = (o) => ({ keys: o, use: '' });
+  assert.equal(asrSelection(k({ anthropic: { key: 'a' } })), null);
+  assert.deepEqual(asrSelection(k({ anthropic: { key: 'a' }, groq: { key: 'g' } })), { id: 'groq', key: 'g', model: 'whisper-large-v3-turbo', base: 'https://api.groq.com/openai/v1' });
+  assert.equal(asrSelection(k({ openai: { key: 'o' }, groq: { key: 'g' } }), { use: 'groq' }).id, 'groq');
+  assert.equal(asrSelection(k({ openai: { key: 'o' } }), { use: 'openai', model: 'gpt-x' }).model, 'gpt-x');
+  assert.equal(asrSelection(k({ custom: { key: 'c', base: 'http://localhost:8000/v1' } })), null, '自定义地址没填模型');
+  assert.equal(asrSelection(k({ custom: { key: 'c', base: 'http://localhost:8000/v1', asrModel: 'small' } })).model, 'small');
+});
+test('cleanSegments：去掉幻听套话、模型自己认为没人说话的、重复循环的；没有 segments 时用整段文字', () => {
+  const j = { segments: [
+    { start: 0, end: 2, text: ' Je ne sais pas. ', no_speech_prob: 0.02, avg_logprob: -0.3, compression_ratio: 1.2 },
+    { start: 2, end: 3, text: 'Sous-titrage ST\' 501', no_speech_prob: 0.01 },
+    { start: 3, end: 4, text: 'Thanks for watching!' },
+    { start: 4, end: 5, text: 'bruit', no_speech_prob: 0.9, avg_logprob: -1.5 },
+    { start: 5, end: 6, text: 'la la la la la la la', compression_ratio: 3.1 },
+  ] };
+  assert.deepEqual(cleanSegments(j, 6), [{ start: 0, end: 2, text: 'Je ne sais pas.' }]);
+  assert.deepEqual(cleanSegments({ text: 'Bonjour tout le monde' }, 3), [{ start: 0, end: 3, text: 'Bonjour tout le monde' }]);
+  assert.deepEqual(cleanSegments({}, 3), []);
+});
+test('transcribe：multipart 请求带模型/语言/格式，错误码映射', async () => {
+  let seen;
+  const f = async (url, init) => { seen = { url, init }; return { ok: true, status: 200, json: async () => ({ language: 'french', segments: [{ start: 0.1, end: 1.9, text: 'Bonjour.' }] }) }; };
+  const sel = { id: 'groq', key: 'gk', model: 'whisper-large-v3-turbo', base: 'https://api.groq.com/openai/v1' };
+  const r = await transcribe({ sel, wav: encodeWav(tone(2, 16000)), language: 'fr', durSec: 2, fetchFn: f });
+  assert.equal(seen.url, 'https://api.groq.com/openai/v1/audio/transcriptions');
+  assert.equal(seen.init.headers.authorization, 'Bearer gk');
+  assert.equal(seen.init.body.get('model'), 'whisper-large-v3-turbo'); assert.equal(seen.init.body.get('language'), 'fr'); assert.equal(seen.init.body.get('response_format'), 'verbose_json');
+  assert.equal(seen.init.body.get('file').size, 44 + 64000);
+  assert.deepEqual(r.segments, [{ start: 0.1, end: 1.9, text: 'Bonjour.' }]); assert.equal(r.language, 'fr');
+  const bad = (status) => transcribe({ sel, wav: new Uint8Array(10), durSec: 1, fetchFn: async () => ({ ok: false, status, text: async () => 'x', json: async () => ({}) }) });
+  await assert.rejects(bad(401), { code: 'auth' }); await assert.rejects(bad(429), { code: 'rate_limit' }); await assert.rejects(bad(500), { code: 'upstream' });
+  await assert.rejects(transcribe({ sel: null, wav: new Uint8Array(1), durSec: 1 }), { code: 'no_asr' });
+  await assert.rejects(transcribe({ sel, wav: new Uint8Array(1), durSec: 1, fetchFn: async () => { throw new TypeError('x'); } }), { code: 'network' });
 });
 
 // ---------- 构建产物 ----------
